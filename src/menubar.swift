@@ -43,29 +43,35 @@ func micActive() -> Bool {
     audioDevices().contains { hasInput($0) && isRunning($0) }
 }
 
-// MARK: - Apple Music control (via osascript, the proven TCC path) ---------------
-
-@discardableResult
-private func osascript(_ source: String) -> String {
-    let p = Process()
-    p.executableURL = URL(fileURLWithPath: "/usr/bin/osascript")
-    p.arguments = ["-e", source]
-    let out = Pipe()
-    p.standardOutput = out
-    p.standardError = Pipe()
-    do { try p.run(); p.waitUntilExit() } catch { return "" }
-    let data = out.fileHandleForReading.readDataToEndOfFile()
-    return String(data: data, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-}
+// MARK: - Apple Music control ---------------------------------------------------
+//
+// We talk to Music with Apple Events sent *in-process* (NSAppleScript) so macOS
+// attributes the Automation permission prompt to THIS app and shows our
+// NSAppleEventsUsageDescription. Whether Music is running is checked via
+// NSWorkspace, which needs no permission at all — so the only consent prompt the
+// user ever sees is a single, clearly-explained request to control Music.
 
 private func musicRunning() -> Bool {
-    osascript(#"tell application "System Events" to (name of processes) contains "Music""#) == "true"
+    NSWorkspace.shared.runningApplications.contains { $0.bundleIdentifier == "com.apple.Music" }
 }
-private func musicState() -> String {
-    osascript(#"tell application "Music" to player state as string"#)
+
+@discardableResult
+private func runAppleScript(_ source: String) -> String? {
+    var error: NSDictionary?
+    guard let script = NSAppleScript(source: source) else { return nil }
+    let result = script.executeAndReturnError(&error)
+    if let error = error {
+        NSLog("AppleScript error: \(error[NSAppleScript.errorMessage] ?? error)")
+        return nil
+    }
+    return result.stringValue
 }
-private func musicPause() { osascript(#"tell application "Music" to pause"#) }
-private func musicPlay()  { osascript(#"tell application "Music" to play"#) }
+
+// NOTE: only call these when musicRunning() is true — "tell application \"Music\""
+// would otherwise launch Music.
+private func musicState() -> String { runAppleScript(#"tell application "Music" to player state as string"#) ?? "" }
+private func musicPause() { runAppleScript(#"tell application "Music" to pause"#) }
+private func musicPlay()  { runAppleScript(#"tell application "Music" to play"#) }
 
 // MARK: - App delegate / menu bar UI --------------------------------------------
 
@@ -93,6 +99,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         RunLoop.main.add(t, forMode: .common)
         timer = t
         NSLog("mic-music-pause menu bar started (enabled=\(enabled))")
+
+        // Prime the Automation permission prompt now (with our clear explanation)
+        // instead of surprising the user mid-call. Only if Music is already running
+        // so we never launch it just to ask.
+        if musicRunning() {
+            DispatchQueue.global().async { _ = musicState() }
+        }
     }
 
     private func buildMenu() {
