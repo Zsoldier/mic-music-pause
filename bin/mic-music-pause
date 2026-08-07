@@ -1,0 +1,98 @@
+#!/bin/bash
+#
+# mic-music-pause — pause Apple Music while your microphone is in use
+# (e.g. a Teams / Zoom / FaceTime call) and resume it when the call ends.
+#
+# Usage:
+#   mic-music-pause watch     Run the watcher loop (used by the launchd service)
+#   mic-music-pause status    Print current mic + Music state and exit
+#   mic-music-pause once      Evaluate a single transition and exit
+#   mic-music-pause help      Show this help
+#
+# Environment:
+#   MIC_MUSIC_POLL     Poll interval in seconds (default: 2)
+#   MICSTATE           Path to the micstate detector binary (auto-detected)
+#   MIC_MUSIC_STATE    State directory (default: ~/.local/state/mic-music-pause)
+
+set -euo pipefail
+
+# --- locate the micstate detector -------------------------------------------
+SELF_DIR="$(cd "$(dirname "$0")" && pwd)"
+find_micstate() {
+  if [ -n "${MICSTATE:-}" ] && [ -x "${MICSTATE}" ]; then echo "${MICSTATE}"; return; fi
+  for c in "${SELF_DIR}/../libexec/micstate" "${SELF_DIR}/micstate" "$(command -v micstate 2>/dev/null || true)"; do
+    if [ -n "$c" ] && [ -x "$c" ]; then echo "$c"; return; fi
+  done
+  echo ""; return
+}
+MIC="$(find_micstate)"
+
+STATE_DIR="${MIC_MUSIC_STATE:-$HOME/.local/state/mic-music-pause}"
+STATE_FILE="${STATE_DIR}/paused_by_us"
+POLL="${MIC_MUSIC_POLL:-2}"
+mkdir -p "${STATE_DIR}"
+
+log() { echo "$(date '+%Y-%m-%d %H:%M:%S') $*"; }
+
+# --- Apple Music helpers (never launch Music if it isn't already running) ----
+music_running() { osascript -e 'tell application "System Events" to (name of processes) contains "Music"'; }
+music_state()   { osascript -e 'tell application "Music" to player state as string' 2>/dev/null || true; }
+music_pause()   { osascript -e 'tell application "Music" to pause' 2>/dev/null || true; }
+music_play()    { osascript -e 'tell application "Music" to play'  2>/dev/null || true; }
+
+mic_active() {
+  [ -n "${MIC}" ] || { log "ERROR: micstate detector not found"; return 2; }
+  [ "$("${MIC}")" = "1" ]
+}
+
+on_mic_on() {
+  if [ "$(music_running)" = "true" ] && [ "$(music_state)" = "playing" ]; then
+    music_pause; echo 1 > "${STATE_FILE}"; log "mic active -> paused Music"
+  fi
+}
+
+on_mic_off() {
+  if [ -f "${STATE_FILE}" ] && [ "$(cat "${STATE_FILE}")" = "1" ]; then
+    [ "$(music_running)" = "true" ] && { music_play; log "mic released -> resumed Music"; }
+    rm -f "${STATE_FILE}"
+  fi
+}
+
+cmd_watch() {
+  [ -n "${MIC}" ] || { log "FATAL: micstate detector not found; is the install complete?"; exit 1; }
+  local prev=0 cur
+  log "watcher started (poll=${POLL}s, detector=${MIC})"
+  while true; do
+    if cur=$("${MIC}" 2>/dev/null); then :; else cur=""; fi
+    if [ "$cur" = "1" ] && [ "$prev" = "0" ]; then on_mic_on
+    elif [ "$cur" = "0" ] && [ "$prev" = "1" ]; then on_mic_off
+    fi
+    [ -n "$cur" ] && prev="$cur"
+    sleep "${POLL}"
+  done
+}
+
+cmd_status() {
+  if [ -z "${MIC}" ]; then echo "detector: NOT FOUND"; else echo "detector: ${MIC}"; fi
+  if [ -n "${MIC}" ]; then echo "mic active: $([ "$("${MIC}")" = "1" ] && echo yes || echo no)"; fi
+  echo "Music running: $(music_running)"
+  echo "Music state: $(music_state)"
+  echo "paused_by_us: $([ -f "${STATE_FILE}" ] && cat "${STATE_FILE}" || echo 0)"
+}
+
+cmd_once() {
+  local prev cur
+  prev=$([ -f "${STATE_FILE}" ] && echo 1 || echo 0)
+  cur=$([ -n "${MIC}" ] && "${MIC}" || echo 0)
+  if [ "$cur" = "1" ]; then on_mic_on; else on_mic_off; fi
+}
+
+usage() { sed -n '2,20p' "$0" | sed 's/^# \{0,1\}//'; }
+
+case "${1:-help}" in
+  watch)  cmd_watch ;;
+  status) cmd_status ;;
+  once)   cmd_once ;;
+  help|-h|--help) usage ;;
+  *) echo "unknown command: $1" >&2; usage; exit 64 ;;
+esac

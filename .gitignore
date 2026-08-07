@@ -1,0 +1,11 @@
+# Build artifacts
+micstate
+*.o
+*.dSYM/
+.build/
+
+# macOS
+.DS_Store
+
+# Local state / logs
+*.log
