@@ -15,8 +15,21 @@ jobs:
   update-tap:
     runs-on: ubuntu-latest
     steps:
+      - name: Check for tap token
+        id: guard
+        env:
+          TOKEN: ${{ secrets.TAP_GITHUB_TOKEN }}
+        run: |
+          if [ -z "$TOKEN" ]; then
+            echo "::warning::TAP_GITHUB_TOKEN not set; skipping automatic tap update."
+            echo "enabled=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "enabled=true" >> "$GITHUB_OUTPUT"
+          fi
+
       - name: Compute version, url and sha256
         id: meta
+        if: steps.guard.outputs.enabled == 'true'
         run: |
           TAG="${GITHUB_REF_NAME}"
           VERSION="${TAG#v}"
@@ -28,6 +41,7 @@ jobs:
           echo "Resolved $TAG -> sha256=$SHA"
 
       - name: Check out the tap
+        if: steps.guard.outputs.enabled == 'true'
         uses: actions/checkout@v4
         with:
           repository: Zsoldier/homebrew-tap
@@ -35,6 +49,7 @@ jobs:
           path: tap
 
       - name: Update formula
+        if: steps.guard.outputs.enabled == 'true'
         run: |
           FORMULA="tap/Formula/mic-music-pause.rb"
           sed -i -E \
@@ -45,6 +60,7 @@ jobs:
           cat "$FORMULA"
 
       - name: Commit and push
+        if: steps.guard.outputs.enabled == 'true'
         run: |
           cd tap
           if git diff --quiet; then
