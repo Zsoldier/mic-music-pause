@@ -123,6 +123,13 @@ Secrets and variables → Actions) containing a GitHub token that can push to th
 - Fine-grained PAT scoped to `Zsoldier/homebrew-tap` with **Contents: Read and write**, or
 - a classic PAT with the `repo` scope.
 
+### Signed & notarized releases
+
+The default formula ad-hoc signs the app on each machine. To ship a stable,
+Developer ID-signed, notarized build (no Gatekeeper warning; Automation grant
+persists across upgrades), see [`packaging/SIGNING.md`](packaging/SIGNING.md).
+Requires an active Apple Developer Program membership.
+
 ## License
 
 MIT © Chris Nakagaki
