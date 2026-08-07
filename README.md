@@ -87,6 +87,25 @@ mic-music-pause help
   when you are *not* in a call, that device is the cause.
 - The trigger is "microphone in use," so it reacts to any call app. That is by design.
 
+## Releasing (maintainers)
+
+Cutting a release automatically updates the formula in
+[`Zsoldier/homebrew-tap`](https://github.com/Zsoldier/homebrew-tap):
+
+```sh
+./scripts/release.sh 0.1.0   # creates the v0.1.0 tag
+git push origin v0.1.0       # triggers .github/workflows/release.yml
+```
+
+The workflow computes the release tarball's `sha256`, rewrites the `url` and
+`sha256` in the tap formula, and pushes the change.
+
+**One-time setup:** add a repository secret named `TAP_GITHUB_TOKEN` (Settings →
+Secrets and variables → Actions) containing a GitHub token that can push to the
+`homebrew-tap` repo:
+- Fine-grained PAT scoped to `Zsoldier/homebrew-tap` with **Contents: Read and write**, or
+- a classic PAT with the `repo` scope.
+
 ## License
 
 MIT © Chris Nakagaki

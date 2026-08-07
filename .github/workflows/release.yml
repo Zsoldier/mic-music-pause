@@ -1,0 +1,57 @@
+name: Update Homebrew tap
+
+# When you push a version tag (e.g. v0.1.0), this computes the release
+# tarball's sha256 and updates the formula in Zsoldier/homebrew-tap.
+#
+# Requires a repository secret named TAP_GITHUB_TOKEN: a GitHub token
+# (fine-grained or classic) with permission to push to Zsoldier/homebrew-tap.
+
+on:
+  push:
+    tags:
+      - "v*"
+
+jobs:
+  update-tap:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Compute version, url and sha256
+        id: meta
+        run: |
+          TAG="${GITHUB_REF_NAME}"
+          VERSION="${TAG#v}"
+          URL="https://github.com/${GITHUB_REPOSITORY}/archive/refs/tags/${TAG}.tar.gz"
+          SHA="$(curl -sL "$URL" | sha256sum | awk '{print $1}')"
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "url=$URL"        >> "$GITHUB_OUTPUT"
+          echo "sha=$SHA"        >> "$GITHUB_OUTPUT"
+          echo "Resolved $TAG -> sha256=$SHA"
+
+      - name: Check out the tap
+        uses: actions/checkout@v4
+        with:
+          repository: Zsoldier/homebrew-tap
+          token: ${{ secrets.TAP_GITHUB_TOKEN }}
+          path: tap
+
+      - name: Update formula
+        run: |
+          FORMULA="tap/Formula/mic-music-pause.rb"
+          sed -i -E \
+            -e "s|^  url \".*\"|  url \"${{ steps.meta.outputs.url }}\"|" \
+            -e "s|^  sha256 \".*\"|  sha256 \"${{ steps.meta.outputs.sha }}\"|" \
+            "$FORMULA"
+          echo "----- updated formula -----"
+          cat "$FORMULA"
+
+      - name: Commit and push
+        run: |
+          cd tap
+          if git diff --quiet; then
+            echo "Formula already up to date; nothing to do."
+            exit 0
+          fi
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git commit -am "mic-music-pause ${{ steps.meta.outputs.version }}"
+          git push
