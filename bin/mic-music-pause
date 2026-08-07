@@ -17,7 +17,14 @@
 set -euo pipefail
 
 # --- locate the micstate detector -------------------------------------------
-SELF_DIR="$(cd "$(dirname "$0")" && pwd)"
+# Resolve symlinks so relative paths work when invoked via a Homebrew bin symlink.
+SOURCE="$0"
+while [ -L "$SOURCE" ]; do
+  DIR="$(cd -P "$(dirname "$SOURCE")" && pwd)"
+  SOURCE="$(readlink "$SOURCE")"
+  case "$SOURCE" in /*) ;; *) SOURCE="$DIR/$SOURCE" ;; esac
+done
+SELF_DIR="$(cd -P "$(dirname "$SOURCE")" && pwd)"
 find_micstate() {
   if [ -n "${MICSTATE:-}" ] && [ -x "${MICSTATE}" ]; then echo "${MICSTATE}"; return; fi
   for c in "${SELF_DIR}/../libexec/micstate" "${SELF_DIR}/micstate" "$(command -v micstate 2>/dev/null || true)"; do
