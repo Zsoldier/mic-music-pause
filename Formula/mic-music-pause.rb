@@ -10,16 +10,18 @@ class MicMusicPause < Formula
   depends_on :macos
 
   def install
-    # Compile the CoreAudio mic-state detector.
+    # Compile the CoreAudio mic-state detector (used by the `mic-music-pause` CLI).
     system "xcrun", "swiftc", "-O", "-o", "micstate", "src/micstate.swift"
+    # Compile the menu bar app (the background service + click-to-toggle switch).
+    system "xcrun", "swiftc", "-O", "-o", "mic-music-pause-menubar", "src/menubar.swift"
     libexec.install "micstate"
     bin.install "bin/mic-music-pause"
+    bin.install "mic-music-pause-menubar"
   end
 
   service do
-    run [opt_bin/"mic-music-pause", "watch"]
+    run [opt_bin/"mic-music-pause-menubar"]
     keep_alive true
-    environment_variables MICSTATE: opt_libexec/"micstate"
     log_path var/"log/mic-music-pause.log"
     error_log_path var/"log/mic-music-pause.log"
   end
@@ -27,5 +29,6 @@ class MicMusicPause < Formula
   test do
     assert_match "mic-music-pause", shell_output("#{bin}/mic-music-pause help")
     assert_predicate libexec/"micstate", :executable?
+    assert_predicate bin/"mic-music-pause-menubar", :executable?
   end
 end

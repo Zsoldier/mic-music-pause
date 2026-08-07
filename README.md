@@ -11,6 +11,19 @@ released, Music resumes — but only if *this tool* was the one that paused it.
 
 > Works for **any** app that uses the microphone, not just Teams.
 
+## Menu bar toggle
+
+The background service runs as a **menu bar app** (a small music-note icon, no Dock
+icon). Click it to:
+
+- **Auto-pause music on calls** — check/uncheck to turn the behavior on or off.
+- See live status: whether you are **in a call** and the current **Music** state.
+- **Quit** the app.
+
+When auto-pause is off the icon dims; when it is actively holding a pause during a
+call the icon changes to a pause symbol. macOS does not allow third-party toggles in
+Control Center, so the menu bar is the native equivalent.
+
 ## Requirements
 
 - macOS (Apple Silicon or Intel)
@@ -76,10 +89,14 @@ mic-music-pause help
 ## How it works
 
 - `src/micstate.swift` compiles to a small binary that prints `1` if **any** audio
-  input device reports `kAudioDevicePropertyDeviceIsRunningSomewhere`, else `0`.
-- `bin/mic-music-pause` polls that value and drives `Music.app` via AppleScript. It
-  only pauses if Music was *playing*, and only resumes if it was the one that paused —
-  so it never hijacks playback you paused yourself.
+  input device reports `kAudioDevicePropertyDeviceIsRunningSomewhere`, else `0`. Used
+  by the `mic-music-pause` CLI.
+- `src/menubar.swift` compiles to `mic-music-pause-menubar`, the menu bar app the
+  service runs. It does the same CoreAudio detection in-process, drives `Music.app`
+  via `osascript`, and exposes the on/off toggle. It only pauses if Music was
+  *playing*, and only resumes if it was the one that paused — so it never hijacks
+  playback you paused yourself.
+- `bin/mic-music-pause` is a CLI for manual/headless use (`status`, `watch`, etc.).
 
 ## Notes / caveats
 
