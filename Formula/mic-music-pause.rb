@@ -1,13 +1,11 @@
 class MicMusicPause < Formula
-  desc "Pause Apple Music while your mic is in use (Teams/Zoom/FaceTime) and resume after"
+  desc "Pause Apple Music while your microphone is in use, then resume"
   homepage "https://github.com/Zsoldier/mic-music-pause"
-  license "MIT"
-  head "https://github.com/Zsoldier/mic-music-pause.git", branch: "main"
-
   # Stable release — fill in the sha256 after tagging (see scripts/release.sh).
   url "https://github.com/Zsoldier/mic-music-pause/archive/refs/tags/v0.1.0.tar.gz"
   sha256 "REPLACE_WITH_SHA256_AFTER_TAGGING"
-  version "0.1.0"
+  license "MIT"
+  head "https://github.com/Zsoldier/mic-music-pause.git", branch: "main"
 
   depends_on :macos
 
