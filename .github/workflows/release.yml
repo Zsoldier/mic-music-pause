@@ -53,11 +53,10 @@ jobs:
           openssl pkcs12 -legacy -in "$RUNNER_TEMP/cert.p12" \
             -passin pass:"$CERT_PASSWORD" -nodes -out "$RUNNER_TEMP/all.pem"
 
-          # The export can contain multiple private keys (e.g. an old Personal
-          # Team key alongside the Developer ID key) but only the Developer ID
-          # certificate. Naively re-exporting grabs the FIRST key, which may not
-          # match the cert -> no identity forms on import. So split the PEM and
-          # pair the cert with the private key whose public key actually matches.
+          # The export can contain multiple certs and private keys (e.g. an
+          # Installer cert, a Personal Team key, etc.). Split the decrypted PEM,
+          # pick the "Developer ID Application" certificate specifically, then
+          # pair it with the private key whose public key matches that cert.
           cd "$RUNNER_TEMP"
           # Split the PEM bundle into individual cert/key pieces (BSD-awk safe).
           awk '/-----BEGIN/{ n++; f=sprintf("piece-%02d.pem", n) } n>0{ print > f }' all.pem
@@ -65,10 +64,20 @@ jobs:
           CERT=""; declare -a KEYS=()
           for p in piece-*.pem; do
             [ -f "$p" ] || continue
-            if grep -q 'BEGIN CERTIFICATE' "$p"; then CERT="$p"; fi
+            if grep -q 'BEGIN CERTIFICATE' "$p"; then
+              subj="$(openssl x509 -in "$p" -noout -subject 2>/dev/null || true)"
+              case "$subj" in
+                *"Developer ID Application"*) CERT="$p" ;;
+              esac
+            fi
             if grep -q 'PRIVATE KEY' "$p"; then KEYS+=("$p"); fi
           done
-          if [ -z "$CERT" ]; then echo "::error::No certificate in export."; exit 1; fi
+          if [ -z "$CERT" ]; then
+            echo "::error::No 'Developer ID Application' certificate in the p12 secret."
+            echo "The DEVELOPER_ID_CERT_P12 secret must contain your Developer ID"
+            echo "Application identity (not an Installer or Personal Team cert)."
+            exit 1
+          fi
 
           CPUB="$(openssl x509 -in "$CERT" -noout -pubkey)"
           MATCH=""
