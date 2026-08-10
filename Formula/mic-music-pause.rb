@@ -14,7 +14,7 @@ class MicMusicPause < Formula
 
   resource "app" do
     url "https://github.com/Zsoldier/mic-music-pause/releases/download/v0.4.0/mic-music-pause-0.4.0-macos.tar.gz"
-    sha256 "06139bd652dce2e062232225e824bbc941c8a4b7d5474736020cd87a78f6e662"
+    sha256 "0e26816e913ac7fd86b0b5d3067cd0e1c53e59de792924fed72b61368b38ab9d"
   end
 
   def install

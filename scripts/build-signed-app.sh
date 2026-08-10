@@ -76,8 +76,12 @@ xcrun stapler validate "$APP"
 spctl --assess --type execute --verbose=4 "$APP" || true
 
 echo "==> Packaging tarball"
+# Wrap the .app in a parent dir: Homebrew strips the single top-level directory
+# when staging a resource, so without this it would land *inside* the bundle.
+mkdir -p "$WORK/pkg"
+mv "$APP" "$WORK/pkg/mic-music-pause.app"
 TARBALL="$OUT_DIR/mic-music-pause-${VERSION}-macos.tar.gz"
-tar -C "$WORK" -czf "$TARBALL" "mic-music-pause.app"
+tar -C "$WORK" -czf "$TARBALL" pkg
 SHA="$(shasum -a 256 "$TARBALL" | awk '{print $1}')"
 
 echo
