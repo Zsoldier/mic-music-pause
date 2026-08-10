@@ -16,9 +16,15 @@
 #          --team-id  "TEAMID" \
 #          --password "app-specific-password"   # https://appleid.apple.com -> App-Specific Passwords
 #
-# Usage:
+# Usage (local, keychain profile):
 #   DEVELOPER_ID_APP="Developer ID Application: Your Name (TEAMID)" \
 #   NOTARY_PROFILE="mmp-notary" \
+#   ./scripts/build-signed-app.sh 0.4.0
+#
+# Usage (CI, direct credentials):
+#   DEVELOPER_ID_APP="Developer ID Application: Your Name (TEAMID)" \
+#   NOTARY_APPLE_ID="you@example.com" NOTARY_TEAM_ID="TEAMID" \
+#   NOTARY_PASSWORD="app-specific-password" \
 #   ./scripts/build-signed-app.sh 0.4.0
 #
 set -euo pipefail
@@ -26,7 +32,16 @@ set -euo pipefail
 VERSION="${1:?usage: build-signed-app.sh <version>}"
 REPO_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 : "${DEVELOPER_ID_APP:?set DEVELOPER_ID_APP to your 'Developer ID Application: ...' identity}"
-: "${NOTARY_PROFILE:=mmp-notary}"
+
+# Notarization credentials: either a stored keychain profile (local dev) OR
+# direct Apple ID / team / app-specific password (CI). Build the notarytool args.
+NOTARY_ARGS=()
+if [ -n "${NOTARY_APPLE_ID:-}" ] && [ -n "${NOTARY_TEAM_ID:-}" ] && [ -n "${NOTARY_PASSWORD:-}" ]; then
+  NOTARY_ARGS=(--apple-id "$NOTARY_APPLE_ID" --team-id "$NOTARY_TEAM_ID" --password "$NOTARY_PASSWORD")
+else
+  : "${NOTARY_PROFILE:=mmp-notary}"
+  NOTARY_ARGS=(--keychain-profile "$NOTARY_PROFILE")
+fi
 
 WORK="$(mktemp -d)"
 APP="$WORK/mic-music-pause.app"
@@ -68,7 +83,7 @@ codesign --verify --strict --verbose=2 "$APP"
 echo "==> Notarizing (this can take a few minutes)"
 ZIP="$WORK/mic-music-pause.zip"
 ditto -c -k --keepParent "$APP" "$ZIP"
-xcrun notarytool submit "$ZIP" --keychain-profile "$NOTARY_PROFILE" --wait
+xcrun notarytool submit "$ZIP" "${NOTARY_ARGS[@]}" --wait
 
 echo "==> Stapling and verifying"
 xcrun stapler staple "$APP"

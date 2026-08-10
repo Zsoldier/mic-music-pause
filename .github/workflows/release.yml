@@ -1,73 +1,125 @@
-name: Update Homebrew tap
+name: Release (sign, notarize, publish)
 
-# When you push a version tag (e.g. v0.1.0), this computes the release
-# tarball's sha256 and updates the formula in Zsoldier/homebrew-tap.
+# On a version tag (e.g. v0.4.0) this builds the menu bar app, signs it with the
+# Developer ID certificate, notarizes + staples it with Apple, attaches the
+# notarized tarball to the GitHub release, and updates the Homebrew tap formula.
 #
-# Requires a repository secret named TAP_GITHUB_TOKEN: a GitHub token
-# (fine-grained or classic) with permission to push to Zsoldier/homebrew-tap.
+# Required repository secrets (see packaging/SIGNING.md and
+# scripts/setup-ci-secrets.sh):
+#   DEVELOPER_ID_CERT_P12       base64 of the exported .p12 (cert + private key)
+#   DEVELOPER_ID_CERT_PASSWORD  password used when exporting the .p12
+#   NOTARY_APPLE_ID             Apple ID email used for notarization
+#   NOTARY_TEAM_ID              Developer Team ID (e.g. U8A2AFWXCM)
+#   NOTARY_PASSWORD             app-specific password for that Apple ID
+#   TAP_GITHUB_TOKEN            token that can push to Zsoldier/homebrew-tap
 
 on:
   push:
     tags:
       - "v*"
 
+permissions:
+  contents: write
+
 jobs:
-  update-tap:
-    runs-on: ubuntu-latest
+  release:
+    runs-on: macos-latest
     steps:
-      - name: Check for tap token
+      - name: Guard — signing secrets present
         id: guard
         env:
-          TOKEN: ${{ secrets.TAP_GITHUB_TOKEN }}
+          CERT: ${{ secrets.DEVELOPER_ID_CERT_P12 }}
         run: |
-          if [ -z "$TOKEN" ]; then
-            echo "::warning::TAP_GITHUB_TOKEN not set; skipping automatic tap update."
-            echo "enabled=false" >> "$GITHUB_OUTPUT"
-          else
-            echo "enabled=true" >> "$GITHUB_OUTPUT"
+          if [ -z "$CERT" ]; then
+            echo "::error::Signing secrets not configured; see packaging/SIGNING.md."
+            exit 1
           fi
 
-      - name: Compute version, url and sha256
-        id: meta
-        if: steps.guard.outputs.enabled == 'true'
+      - uses: actions/checkout@v4
+
+      - name: Import Developer ID certificate
+        env:
+          CERT_P12_BASE64: ${{ secrets.DEVELOPER_ID_CERT_P12 }}
+          CERT_PASSWORD: ${{ secrets.DEVELOPER_ID_CERT_PASSWORD }}
         run: |
-          TAG="${GITHUB_REF_NAME}"
+          KEYCHAIN="$RUNNER_TEMP/app-signing.keychain-db"
+          KEYCHAIN_PW="$(uuidgen)"
+          echo "$CERT_P12_BASE64" | base64 --decode > "$RUNNER_TEMP/cert.p12"
+          security create-keychain -p "$KEYCHAIN_PW" "$KEYCHAIN"
+          security set-keychain-settings -lut 21600 "$KEYCHAIN"
+          security unlock-keychain -p "$KEYCHAIN_PW" "$KEYCHAIN"
+          security import "$RUNNER_TEMP/cert.p12" -P "$CERT_PASSWORD" \
+            -A -t cert -f pkcs12 -k "$KEYCHAIN"
+          security set-key-partition-list -S apple-tool:,apple:,codesign: \
+            -s -k "$KEYCHAIN_PW" "$KEYCHAIN" >/dev/null
+          # Make this keychain visible to codesign/notarytool.
+          security list-keychain -d user -s "$KEYCHAIN" login.keychain-db
+          IDENTITY="$(security find-identity -v -p codesigning "$KEYCHAIN" \
+            | grep 'Developer ID Application' | head -1 | sed -E 's/.*"(.*)".*/\1/')"
+          if [ -z "$IDENTITY" ]; then
+            echo "::error::No Developer ID Application identity found in imported keychain."
+            exit 1
+          fi
+          echo "DEVELOPER_ID_APP=$IDENTITY" >> "$GITHUB_ENV"
+          echo "Imported identity: $IDENTITY"
+          rm -f "$RUNNER_TEMP/cert.p12"
+
+      - name: Build, sign, notarize, package
+        env:
+          NOTARY_APPLE_ID: ${{ secrets.NOTARY_APPLE_ID }}
+          NOTARY_TEAM_ID: ${{ secrets.NOTARY_TEAM_ID }}
+          NOTARY_PASSWORD: ${{ secrets.NOTARY_PASSWORD }}
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          ./scripts/build-signed-app.sh "$VERSION"
+
+      - name: Publish release asset
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          TAG="$GITHUB_REF_NAME"
           VERSION="${TAG#v}"
-          URL="https://github.com/${GITHUB_REPOSITORY}/archive/refs/tags/${TAG}.tar.gz"
-          SHA="$(curl -sL "$URL" | sha256sum | awk '{print $1}')"
-          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
-          echo "url=$URL"        >> "$GITHUB_OUTPUT"
-          echo "sha=$SHA"        >> "$GITHUB_OUTPUT"
-          echo "Resolved $TAG -> sha256=$SHA"
+          ASSET="dist/mic-music-pause-${VERSION}-macos.tar.gz"
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            gh release upload "$TAG" "$ASSET" --clobber
+          else
+            gh release create "$TAG" "$ASSET" --title "$TAG" --generate-notes
+          fi
 
-      - name: Check out the tap
-        if: steps.guard.outputs.enabled == 'true'
-        uses: actions/checkout@v4
-        with:
-          repository: Zsoldier/homebrew-tap
-          token: ${{ secrets.TAP_GITHUB_TOKEN }}
-          path: tap
-
-      - name: Update formula
-        if: steps.guard.outputs.enabled == 'true'
+      - name: Update Homebrew tap formula
+        env:
+          TAP_TOKEN: ${{ secrets.TAP_GITHUB_TOKEN }}
         run: |
+          if [ -z "$TAP_TOKEN" ]; then
+            echo "::warning::TAP_GITHUB_TOKEN not set; skipping tap update."
+            exit 0
+          fi
+          TAG="$GITHUB_REF_NAME"
+          VERSION="${TAG#v}"
+          REPO="${GITHUB_REPOSITORY}"
+          SRC_URL="https://github.com/${REPO}/archive/refs/tags/${TAG}.tar.gz"
+          SRC_SHA="$(curl -sL "$SRC_URL" | shasum -a 256 | awk '{print $1}')"
+          APP_URL="https://github.com/${REPO}/releases/download/${TAG}/mic-music-pause-${VERSION}-macos.tar.gz"
+          APP_SHA="$(shasum -a 256 "dist/mic-music-pause-${VERSION}-macos.tar.gz" | awk '{print $1}')"
+
+          git clone "https://x-access-token:${TAP_TOKEN}@github.com/Zsoldier/homebrew-tap.git" tap
           FORMULA="tap/Formula/mic-music-pause.rb"
-          sed -i -E \
-            -e "s|^  url \".*\"|  url \"${{ steps.meta.outputs.url }}\"|" \
-            -e "s|^  sha256 \".*\"|  sha256 \"${{ steps.meta.outputs.sha }}\"|" \
+          # 2-space indent = top-level (source); 4-space indent = resource "app".
+          sed -i '' -E \
+            -e "s|^  version \".*\"|  version \"${VERSION}\"|" \
+            -e "s|^  url \".*\"|  url \"${SRC_URL}\"|" \
+            -e "s|^  sha256 \".*\"|  sha256 \"${SRC_SHA}\"|" \
+            -e "s|^    url \".*\"|    url \"${APP_URL}\"|" \
+            -e "s|^    sha256 \".*\"|    sha256 \"${APP_SHA}\"|" \
             "$FORMULA"
           echo "----- updated formula -----"
           cat "$FORMULA"
-
-      - name: Commit and push
-        if: steps.guard.outputs.enabled == 'true'
-        run: |
           cd tap
           if git diff --quiet; then
-            echo "Formula already up to date; nothing to do."
+            echo "Formula already up to date."
             exit 0
           fi
           git config user.name  "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git commit -am "mic-music-pause ${{ steps.meta.outputs.version }}"
+          git commit -am "mic-music-pause ${VERSION} (notarized)"
           git push

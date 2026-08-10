@@ -72,6 +72,36 @@ pre-built release asset that everyone downloads.
 - Notarization requires the **Hardened Runtime** (`codesign --options runtime`)
   plus the `com.apple.security.automation.apple-events` entitlement (see
   `packaging/mic-music-pause.entitlements`) so the app can still control Music.
-- To automate this in CI later, store the signing certificate (base64 `.p12` +
-  password) and notarytool credentials as GitHub Actions secrets and run the
-  same steps on a macOS runner.
+
+## Automating it in CI (GitHub Actions)
+
+`.github/workflows/release.yml` runs the whole pipeline on a macOS runner when
+you push a `v*` tag: it signs, notarizes, staples, publishes the release asset,
+and updates the tap formula. Set these repository secrets once:
+
+| Secret | What |
+| --- | --- |
+| `DEVELOPER_ID_CERT_P12` | base64 of your exported `.p12` (cert + private key) |
+| `DEVELOPER_ID_CERT_PASSWORD` | password you set when exporting the `.p12` |
+| `NOTARY_APPLE_ID` | Apple ID email used for notarization |
+| `NOTARY_TEAM_ID` | Developer Team ID (e.g. `U8A2AFWXCM`) |
+| `NOTARY_PASSWORD` | app-specific password for that Apple ID |
+| `TAP_GITHUB_TOKEN` | token that can push to `Zsoldier/homebrew-tap` |
+
+Export the certificate from **Keychain Access → My Certificates →** right-click
+**"Developer ID Application: …" → Export…** as a `.p12` (choose a password).
+Then configure all secrets in one go:
+
+```sh
+./scripts/setup-ci-secrets.sh ~/Desktop/DeveloperID.p12
+```
+
+After that, cutting a release is just:
+
+```sh
+./scripts/release.sh 0.5.0 && git push origin v0.5.0
+```
+
+The workflow does the rest. To run it manually instead, follow the per-release
+steps above.
+
