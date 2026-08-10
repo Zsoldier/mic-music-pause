@@ -1,5 +1,6 @@
 import Cocoa
 import CoreAudio
+import ServiceManagement
 
 // MARK: - Microphone detection (CoreAudio) --------------------------------------
 
@@ -135,6 +136,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var toggleItem: NSMenuItem!
     private var audioToggleItem: NSMenuItem!
     private var lockToggleItem: NSMenuItem!
+    private var loginItem: NSMenuItem!
     private var callInfoItem: NSMenuItem!
     private var musicInfoItem: NSMenuItem!
     private var updateItem: NSMenuItem!
@@ -170,9 +172,23 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
+        // Single-instance: if an older copy is already running (e.g. after an
+        // in-app upgrade relaunch), replace it so there's never a duplicate icon.
+        let mypid = NSRunningApplication.current.processIdentifier
+        for other in NSRunningApplication.runningApplications(withBundleIdentifier: selfBundleID)
+            where other.processIdentifier != mypid {
+            other.terminate()
+        }
+
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
         buildMenu()
         refresh(active: micActive())
+
+        // If "start at login" is on, re-register so the recorded launch path
+        // stays correct after a Homebrew upgrade moved the app bundle.
+        if #available(macOS 13.0, *), SMAppService.mainApp.status == .enabled {
+            try? SMAppService.mainApp.register()
+        }
         let t = Timer(timeInterval: 2.0, repeats: true) { [weak self] _ in self?.tick() }
         RunLoop.main.add(t, forMode: .common)
         timer = t
@@ -221,6 +237,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         lockToggleItem.target = self
         lockToggleItem.state = pauseOnScreenLock ? .on : .off
         menu.addItem(lockToggleItem)
+
+        if #available(macOS 13.0, *) {
+            loginItem = NSMenuItem(title: "Start at login",
+                                   action: #selector(toggleLoginItem), keyEquivalent: "")
+            loginItem.target = self
+            loginItem.state = (SMAppService.mainApp.status == .enabled) ? .on : .off
+            menu.addItem(loginItem)
+        }
 
         menu.addItem(.separator())
 
@@ -280,6 +304,26 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
         NSLog("mic-music-pause pause-on-screen-lock \(pauseOnScreenLock ? "enabled" : "disabled")")
         tick()
+    }
+
+    @objc private func toggleLoginItem() {
+        guard #available(macOS 13.0, *) else { return }
+        do {
+            if SMAppService.mainApp.status == .enabled {
+                try SMAppService.mainApp.unregister()
+            } else {
+                try SMAppService.mainApp.register()
+            }
+        } catch {
+            NSLog("mic-music-pause start-at-login toggle failed: \(error.localizedDescription)")
+            // Surface the failure so the user isn't left with a wrong checkmark.
+            let alert = NSAlert()
+            alert.messageText = "Couldn't change \u{201C}Start at login\u{201D}"
+            alert.informativeText = error.localizedDescription
+            alert.runModal()
+        }
+        loginItem.state = (SMAppService.mainApp.status == .enabled) ? .on : .off
+        NSLog("mic-music-pause start-at-login \(SMAppService.mainApp.status == .enabled ? "enabled" : "disabled")")
     }
 
     @objc private func onScreenLocked() {
@@ -347,6 +391,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         echo "Upgrading mic-music-pause…"
         "\(brew)" upgrade zsoldier/tap/mic-music-pause
         echo
+        echo "Relaunching the app…"
+        APP="$("\(brew)" --prefix mic-music-pause)/libexec/mic-music-pause.app"
+        [ -d "$APP" ] && open -n "$APP"
         echo "Done. You can close this window."
         """
         let path = NSTemporaryDirectory() + "mic-music-pause-upgrade.command"

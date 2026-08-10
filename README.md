@@ -13,7 +13,7 @@ released, Music resumes — but only if *this tool* was the one that paused it.
 
 ## Menu bar toggle
 
-The background service runs as a **menu bar app** (a small music-note icon, no Dock
+The app runs as a **menu bar app** (a small music-note icon, no Dock
 icon). Click it to:
 
 - **Auto-pause music on calls** — check/uncheck to turn the behavior on or off.
@@ -22,6 +22,8 @@ icon). Click it to:
   audio, and resumes when it stops.
 - **Also pause when screen locks** — optional (off by default). When on, Music
   pauses the moment your screen locks and resumes when you unlock.
+- **Start at login** — optional. Launches the app automatically when you log in
+  (uses macOS Login Items).
 - **Update available: vX.Y.Z** — appears only when a newer release exists on the
   tap. Click it to run `brew upgrade` in Terminal.
 - See live status: whether you are **in a call** and the current **Music** state.
@@ -43,25 +45,27 @@ Control Center, so the menu bar is the native equivalent.
 ```sh
 brew tap Zsoldier/tap
 brew install mic-music-pause
-brew services start mic-music-pause
+open "$(brew --prefix mic-music-pause)/libexec/mic-music-pause.app"
 ```
 
 Until a tagged release exists you can install the latest `main` directly:
 
 ```sh
 brew install --HEAD Zsoldier/tap/mic-music-pause
-brew services start mic-music-pause
+open "$(brew --prefix mic-music-pause)/libexec/mic-music-pause.app"
 ```
 
-That's it — it now runs in the background and starts again at login.
+Once it's running, click the menu bar icon and enable **Start at login** so it
+launches automatically when you log in.
 
-### Manage the service
+### Start at login / quitting
 
-```sh
-brew services stop mic-music-pause     # stop
-brew services restart mic-music-pause  # restart
-tail -f "$(brew --prefix)/var/log/mic-music-pause.log"
-```
+- **Start at login** — toggle it from the menu bar icon (uses macOS Login Items;
+  no background daemon).
+- **Quit** — use the menu's Quit item. It won't relaunch until you open it again
+  or log in with "Start at login" enabled.
+- To turn off auto-start, uncheck **Start at login** (or remove it under System
+  Settings → General → Login Items).
 
 ## Install (manual, no Homebrew)
 

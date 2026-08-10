@@ -35,11 +35,14 @@ class MicMusicPause < Formula
     (bin/"mic-music-pause-menubar").chmod 0755
   end
 
-  service do
-    run [opt_libexec/"mic-music-pause.app/Contents/MacOS/mic-music-pause-menubar"]
-    keep_alive true
-    log_path var/"log/mic-music-pause.log"
-    error_log_path var/"log/mic-music-pause.log"
+  def caveats
+    <<~EOS
+      mic-music-pause is a menu bar app. Launch it now with:
+        open "#{opt_libexec}/mic-music-pause.app"
+
+      Then click its menu bar icon and enable "Start at login" so it launches
+      automatically when you log in.
+    EOS
   end
 
   test do
