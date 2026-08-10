@@ -134,15 +134,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var statusItem: NSStatusItem!
     private var toggleItem: NSMenuItem!
     private var audioToggleItem: NSMenuItem!
+    private var lockToggleItem: NSMenuItem!
     private var callInfoItem: NSMenuItem!
     private var musicInfoItem: NSMenuItem!
     private var timer: Timer?
 
     private var triggerWasActive = false
     private var pausedByUs = false
-    private var pauseReason = ""      // "call" or "audio" — why we're holding a pause
+    private var pauseReason = ""      // "call", "audio", or "lock" — why we're holding a pause
     private var audioActiveSince: Date?  // when other-app audio was first seen (debounce)
     private let audioConfirmSeconds = 1.2 // other-app audio must persist this long to pause
+    private var screenLocked = false     // updated by screen lock/unlock notifications
 
     private let defaults = UserDefaults.standard
     private var enabled: Bool {
@@ -154,6 +156,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         get { defaults.object(forKey: "pauseOnOtherAudioEnabled") as? Bool ?? false }
         set { defaults.set(newValue, forKey: "pauseOnOtherAudioEnabled") }
     }
+    // Optional: also pause when the screen locks, resume on unlock (default off).
+    private var pauseOnScreenLock: Bool {
+        get { defaults.object(forKey: "pauseOnScreenLockEnabled") as? Bool ?? false }
+        set { defaults.set(newValue, forKey: "pauseOnScreenLockEnabled") }
+    }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
@@ -162,7 +169,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let t = Timer(timeInterval: 2.0, repeats: true) { [weak self] _ in self?.tick() }
         RunLoop.main.add(t, forMode: .common)
         timer = t
-        NSLog("mic-music-pause menu bar started (enabled=\(enabled), pauseOnOtherAudio=\(pauseOnOtherAudio))")
+
+        // Screen lock/unlock are delivered as distributed notifications; observe
+        // them so we can pause/resume immediately rather than waiting for the poll.
+        let dnc = DistributedNotificationCenter.default()
+        dnc.addObserver(self, selector: #selector(onScreenLocked),
+                        name: NSNotification.Name("com.apple.screenIsLocked"), object: nil)
+        dnc.addObserver(self, selector: #selector(onScreenUnlocked),
+                        name: NSNotification.Name("com.apple.screenIsUnlocked"), object: nil)
+
+        NSLog("mic-music-pause menu bar started (enabled=\(enabled), pauseOnOtherAudio=\(pauseOnOtherAudio), pauseOnScreenLock=\(pauseOnScreenLock))")
 
         // Prime the Automation permission prompt now (with our clear explanation)
         // instead of surprising the user mid-call. Only if Music is already running
@@ -186,6 +202,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         audioToggleItem.target = self
         audioToggleItem.state = pauseOnOtherAudio ? .on : .off
         menu.addItem(audioToggleItem)
+
+        lockToggleItem = NSMenuItem(title: "Also pause when screen locks",
+                                    action: #selector(toggleScreenLock), keyEquivalent: "")
+        lockToggleItem.target = self
+        lockToggleItem.state = pauseOnScreenLock ? .on : .off
+        menu.addItem(lockToggleItem)
 
         menu.addItem(.separator())
 
@@ -230,6 +252,28 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         tick()
     }
 
+    @objc private func toggleScreenLock() {
+        pauseOnScreenLock.toggle()
+        lockToggleItem.state = pauseOnScreenLock ? .on : .off
+        // If turning off a lock-triggered pause (and nothing else is active), resume.
+        if !pauseOnScreenLock && pausedByUs && pauseReason == "lock" && !micActive() {
+            if musicRunning() { musicPlay() }
+            pausedByUs = false
+        }
+        NSLog("mic-music-pause pause-on-screen-lock \(pauseOnScreenLock ? "enabled" : "disabled")")
+        tick()
+    }
+
+    @objc private func onScreenLocked() {
+        screenLocked = true
+        tick()
+    }
+
+    @objc private func onScreenUnlocked() {
+        screenLocked = false
+        tick()
+    }
+
     private func tick() {
         // Mic (a call) always triggers. Other-app audio triggers only when enabled,
         // and must persist for `audioConfirmSeconds` so brief notification sounds are
@@ -247,8 +291,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             audioActiveSince = nil
         }
 
-        let active = mic || audioActive
-        let reason = mic ? "call" : (audioActive ? "audio" : "")
+        let active = mic || audioActive || (pauseOnScreenLock && screenLocked)
+        let reason = mic ? "call" : (audioActive ? "audio" : ((pauseOnScreenLock && screenLocked) ? "lock" : ""))
 
         if enabled {
             if active && !triggerWasActive {
@@ -283,6 +327,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         switch reason {
         case "call":  label = "● In a call"
         case "audio": label = "● Other audio playing"
+        case "lock":  label = "● Screen locked"
         default:      label = "○ Idle"
         }
         callInfoItem?.title = label

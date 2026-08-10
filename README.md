@@ -20,6 +20,8 @@ icon). Click it to:
 - **Also pause for audio from other apps** — optional (off by default). When on,
   Music also pauses if another app (e.g. a video in your browser) starts playing
   audio, and resumes when it stops.
+- **Also pause when screen locks** — optional (off by default). When on, Music
+  pauses the moment your screen locks and resumes when you unlock.
 - See live status: whether you are **in a call** and the current **Music** state.
 - **Quit** the app.
 
@@ -104,6 +106,9 @@ mic-music-pause help
   `kAudioProcessPropertyIsRunningOutput`, macOS 14.2+) to see which apps are playing
   sound, ignoring Music itself. A short debounce keeps brief notification chimes from
   triggering a pause.
+- The optional "pause when screen locks" toggle listens for the system
+  `com.apple.screenIsLocked` / `com.apple.screenIsUnlocked` notifications, so it
+  pauses/resumes immediately on lock/unlock rather than waiting for the next poll.
 - `bin/mic-music-pause` is a CLI for manual/headless use (`status`, `watch`, etc.).
 
 ## Notes / caveats
