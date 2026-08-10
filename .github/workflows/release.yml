@@ -42,38 +42,60 @@ jobs:
           CERT_P12_BASE64: ${{ secrets.DEVELOPER_ID_CERT_P12 }}
           CERT_PASSWORD: ${{ secrets.DEVELOPER_ID_CERT_PASSWORD }}
         run: |
-          set +e
+          set -euo pipefail
           KEYCHAIN="$RUNNER_TEMP/app-signing.keychain-db"
           KEYCHAIN_PW="$(uuidgen)"
           printf '%s' "$CERT_P12_BASE64" | base64 --decode > "$RUNNER_TEMP/cert.p12"
-          echo "openssl: $(command -v openssl) / $(openssl version)"
-          echo "cert.p12 bytes: $(wc -c < "$RUNNER_TEMP/cert.p12")"
 
-          echo "== step1: legacy -> PEM =="
-          openssl pkcs12 -legacy -in "$RUNNER_TEMP/cert.p12" -passin pass:"$CERT_PASSWORD" \
-            -nodes -out "$RUNNER_TEMP/all.pem"; echo "rc=$?"
-          echo "all.pem bytes: $(wc -c < "$RUNNER_TEMP/all.pem" 2>/dev/null)"
-          echo "private keys in pem: $(grep -c 'PRIVATE KEY' "$RUNNER_TEMP/all.pem" 2>/dev/null)"
-          echo "certs in pem: $(grep -c 'BEGIN CERTIFICATE' "$RUNNER_TEMP/all.pem" 2>/dev/null)"
+          # Keychain Access exports .p12 with legacy (RC2-40) encryption that
+          # newer macOS `security import` can't read. Decrypt with OpenSSL's
+          # legacy provider to PEM, then rebuild a clean modern p12.
+          openssl pkcs12 -legacy -in "$RUNNER_TEMP/cert.p12" \
+            -passin pass:"$CERT_PASSWORD" -nodes -out "$RUNNER_TEMP/all.pem"
 
-          echo "== step2: PEM -> modern p12 =="
-          openssl pkcs12 -in "$RUNNER_TEMP/all.pem" -export \
-            -passout pass:"$CERT_PASSWORD" -out "$RUNNER_TEMP/modern.p12"; echo "rc=$?"
-          echo "modern.p12 bytes: $(wc -c < "$RUNNER_TEMP/modern.p12" 2>/dev/null)"
+          # The export can contain multiple private keys (e.g. an old Personal
+          # Team key alongside the Developer ID key) but only the Developer ID
+          # certificate. Naively re-exporting grabs the FIRST key, which may not
+          # match the cert -> no identity forms on import. So split the PEM and
+          # pair the cert with the private key whose public key actually matches.
+          cd "$RUNNER_TEMP"
+          # Split the PEM bundle into individual cert/key pieces (BSD-awk safe).
+          awk '/-----BEGIN/{ n++; f=sprintf("piece-%02d.pem", n) } n>0{ print > f }' all.pem
+
+          CERT=""; declare -a KEYS=()
+          for p in piece-*.pem; do
+            [ -f "$p" ] || continue
+            if grep -q 'BEGIN CERTIFICATE' "$p"; then CERT="$p"; fi
+            if grep -q 'PRIVATE KEY' "$p"; then KEYS+=("$p"); fi
+          done
+          if [ -z "$CERT" ]; then echo "::error::No certificate in export."; exit 1; fi
+
+          CPUB="$(openssl x509 -in "$CERT" -noout -pubkey)"
+          MATCH=""
+          for kf in "${KEYS[@]}"; do
+            if [ "$(openssl pkey -in "$kf" -pubout 2>/dev/null)" = "$CPUB" ]; then
+              MATCH="$kf"; break
+            fi
+          done
+          if [ -z "$MATCH" ]; then
+            echo "::error::No private key matching the certificate found in export."
+            exit 1
+          fi
+
+          openssl pkcs12 -export -inkey "$MATCH" -in "$CERT" \
+            -passout pass:"$CERT_PASSWORD" -out "$RUNNER_TEMP/modern.p12"
 
           security create-keychain -p "$KEYCHAIN_PW" "$KEYCHAIN"
           security set-keychain-settings -lut 21600 "$KEYCHAIN"
           security unlock-keychain -p "$KEYCHAIN_PW" "$KEYCHAIN"
-          echo "== security import =="
           security import "$RUNNER_TEMP/modern.p12" -P "$CERT_PASSWORD" \
-            -A -f pkcs12 -k "$KEYCHAIN" -T /usr/bin/codesign; echo "import rc=$?"
-          echo "== certs now in keychain =="
-          security find-certificate -a "$KEYCHAIN" -Z 2>/dev/null | grep -c "SHA-1"
+            -A -f pkcs12 -k "$KEYCHAIN" -T /usr/bin/codesign
           security set-key-partition-list -S apple-tool:,apple:,codesign: \
-            -s -k "$KEYCHAIN_PW" "$KEYCHAIN" >/dev/null; echo "partition rc=$?"
+            -s -k "$KEYCHAIN_PW" "$KEYCHAIN" >/dev/null
           security list-keychain -d user -s "$KEYCHAIN" login.keychain-db
+
           echo "Identities in signing keychain:"
-          security find-identity -p codesigning "$KEYCHAIN"
+          security find-identity -p codesigning "$KEYCHAIN" || true
           IDENTITY="$(security find-identity -p codesigning "$KEYCHAIN" \
             | grep 'Developer ID Application' | head -1 | sed -E 's/.*"(.*)".*/\1/')"
           if [ -z "$IDENTITY" ]; then
@@ -82,7 +104,8 @@ jobs:
           fi
           echo "DEVELOPER_ID_APP=$IDENTITY" >> "$GITHUB_ENV"
           echo "Imported identity: $IDENTITY"
-          rm -f "$RUNNER_TEMP/cert.p12" "$RUNNER_TEMP/all.pem" "$RUNNER_TEMP/modern.p12"
+          rm -f "$RUNNER_TEMP"/cert.p12 "$RUNNER_TEMP"/all.pem \
+            "$RUNNER_TEMP"/modern.p12 "$RUNNER_TEMP"/piece-*.pem
 
       - name: Build, sign, notarize, package
         env:
