@@ -22,6 +22,8 @@ icon). Click it to:
   audio, and resumes when it stops.
 - **Also pause when screen locks** — optional (off by default). When on, Music
   pauses the moment your screen locks and resumes when you unlock.
+- **Update available: vX.Y.Z** — appears only when a newer release exists on the
+  tap. Click it to run `brew upgrade` in Terminal.
 - See live status: whether you are **in a call** and the current **Music** state.
 - **Quit** the app.
 
@@ -109,6 +111,10 @@ mic-music-pause help
 - The optional "pause when screen locks" toggle listens for the system
   `com.apple.screenIsLocked` / `com.apple.screenIsUnlocked` notifications, so it
   pauses/resumes immediately on lock/unlock rather than waiting for the next poll.
+- The menu bar app checks the GitHub Releases API (unauthenticated, once at launch
+  then every 6 hours) and, if a newer version is published, shows an "Update
+  available" item that runs `brew upgrade` in Terminal. `brew` remains the single
+  source of truth for updates; the app only surfaces the nudge.
 - `bin/mic-music-pause` is a CLI for manual/headless use (`status`, `watch`, etc.).
 
 ## Notes / caveats

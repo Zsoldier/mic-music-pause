@@ -137,7 +137,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var lockToggleItem: NSMenuItem!
     private var callInfoItem: NSMenuItem!
     private var musicInfoItem: NSMenuItem!
+    private var updateItem: NSMenuItem!
     private var timer: Timer?
+    private var updateTimer: Timer?
 
     private var triggerWasActive = false
     private var pausedByUs = false
@@ -145,6 +147,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var audioActiveSince: Date?  // when other-app audio was first seen (debounce)
     private let audioConfirmSeconds = 1.2 // other-app audio must persist this long to pause
     private var screenLocked = false     // updated by screen lock/unlock notifications
+
+    // This build's version (from Info.plist) and the latest seen on GitHub.
+    private let appVersion = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "0"
+    private var latestVersion: String?
+    private let releasesAPI = "https://api.github.com/repos/Zsoldier/mic-music-pause/releases/latest"
 
     private let defaults = UserDefaults.standard
     private var enabled: Bool {
@@ -179,6 +186,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                         name: NSNotification.Name("com.apple.screenIsUnlocked"), object: nil)
 
         NSLog("mic-music-pause menu bar started (enabled=\(enabled), pauseOnOtherAudio=\(pauseOnOtherAudio), pauseOnScreenLock=\(pauseOnScreenLock))")
+
+        // Check for a newer release shortly after launch, then every 6 hours.
+        DispatchQueue.main.asyncAfter(deadline: .now() + 5) { [weak self] in self?.checkForUpdate() }
+        let ut = Timer(timeInterval: 6 * 60 * 60, repeats: true) { [weak self] _ in self?.checkForUpdate() }
+        RunLoop.main.add(ut, forMode: .common)
+        updateTimer = ut
 
         // Prime the Automation permission prompt now (with our clear explanation)
         // instead of surprising the user mid-call. Only if Music is already running
@@ -218,6 +231,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         musicInfoItem = NSMenuItem(title: "Music: —", action: nil, keyEquivalent: "")
         musicInfoItem.isEnabled = false
         menu.addItem(musicInfoItem)
+
+        updateItem = NSMenuItem(title: "", action: #selector(openUpdate), keyEquivalent: "")
+        updateItem.target = self
+        updateItem.isHidden = true   // shown only when a newer release is found
+        menu.addItem(updateItem)
 
         menu.addItem(.separator())
 
@@ -272,6 +290,77 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     @objc private func onScreenUnlocked() {
         screenLocked = false
         tick()
+    }
+
+    // MARK: - Update checking
+
+    /// Fetch the latest release tag from GitHub and, if it's newer than this
+    /// build, reveal the "Update available" menu item. Network only; no auth.
+    private func checkForUpdate() {
+        guard let url = URL(string: releasesAPI) else { return }
+        var req = URLRequest(url: url, timeoutInterval: 15)
+        req.setValue("mic-music-pause", forHTTPHeaderField: "User-Agent")
+        req.setValue("application/vnd.github+json", forHTTPHeaderField: "Accept")
+        URLSession.shared.dataTask(with: req) { [weak self] data, _, _ in
+            guard let self, let data,
+                  let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                  let tag = obj["tag_name"] as? String else { return }
+            let latest = tag.hasPrefix("v") ? String(tag.dropFirst()) : tag
+            DispatchQueue.main.async { self.applyUpdateState(latest: latest) }
+        }.resume()
+    }
+
+    private func applyUpdateState(latest: String) {
+        guard isNewer(latest, than: appVersion) else {
+            updateItem.isHidden = true
+            return
+        }
+        latestVersion = latest
+        updateItem.title = "Update available: v\(latest) — click to update"
+        updateItem.isHidden = false
+        NSLog("mic-music-pause update available: \(appVersion) -> \(latest)")
+    }
+
+    /// Compare dotted version strings numerically (e.g. "0.10.0" > "0.9.0").
+    /// Non-numeric suffixes (like "-test") are ignored per component.
+    private func isNewer(_ latest: String, than current: String) -> Bool {
+        func parts(_ v: String) -> [Int] {
+            v.split(separator: ".").map { Int($0.prefix { $0.isNumber }) ?? 0 }
+        }
+        let a = parts(latest), b = parts(current)
+        for i in 0..<max(a.count, b.count) {
+            let x = i < a.count ? a[i] : 0
+            let y = i < b.count ? b[i] : 0
+            if x != y { return x > y }
+        }
+        return false
+    }
+
+    /// Run `brew upgrade` in Terminal via a throwaway .command file. Opening the
+    /// file launches Terminal independently, so it survives brew restarting our
+    /// service, and it needs no extra automation permission.
+    @objc private func openUpdate() {
+        let brew = FileManager.default.fileExists(atPath: "/opt/homebrew/bin/brew")
+            ? "/opt/homebrew/bin/brew" : "/usr/local/bin/brew"
+        let script = """
+        #!/bin/bash
+        echo "Upgrading mic-music-pause…"
+        "\(brew)" upgrade zsoldier/tap/mic-music-pause
+        echo
+        echo "Done. You can close this window."
+        """
+        let path = NSTemporaryDirectory() + "mic-music-pause-upgrade.command"
+        do {
+            try script.write(toFile: path, atomically: true, encoding: .utf8)
+            try FileManager.default.setAttributes([.posixPermissions: 0o755],
+                                                  ofItemAtPath: path)
+            NSWorkspace.shared.open(URL(fileURLWithPath: path))
+        } catch {
+            // Fallback: open the releases page so the user can update manually.
+            if let url = URL(string: "https://github.com/Zsoldier/mic-music-pause/releases/latest") {
+                NSWorkspace.shared.open(url)
+            }
+        }
     }
 
     private func tick() {
