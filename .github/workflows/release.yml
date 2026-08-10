@@ -42,22 +42,26 @@ jobs:
           CERT_P12_BASE64: ${{ secrets.DEVELOPER_ID_CERT_P12 }}
           CERT_PASSWORD: ${{ secrets.DEVELOPER_ID_CERT_PASSWORD }}
         run: |
+          set -x
           KEYCHAIN="$RUNNER_TEMP/app-signing.keychain-db"
           KEYCHAIN_PW="$(uuidgen)"
-          echo "$CERT_P12_BASE64" | base64 --decode > "$RUNNER_TEMP/cert.p12"
+          printf '%s' "$CERT_P12_BASE64" | base64 --decode > "$RUNNER_TEMP/cert.p12"
+          echo "decoded p12 size: $(wc -c < "$RUNNER_TEMP/cert.p12") bytes"
+          echo "== openssl inspection of decoded p12 (bag types) =="
+          openssl pkcs12 -in "$RUNNER_TEMP/cert.p12" -passin pass:"$CERT_PASSWORD" -noout -info 2>&1 \
+            | grep -iE "MAC|keybag|shrouded|certBag|Error|invalid|mac verify" || true
           security create-keychain -p "$KEYCHAIN_PW" "$KEYCHAIN"
           security set-keychain-settings -lut 21600 "$KEYCHAIN"
           security unlock-keychain -p "$KEYCHAIN_PW" "$KEYCHAIN"
+          echo "== security import =="
           security import "$RUNNER_TEMP/cert.p12" -P "$CERT_PASSWORD" \
-            -A -f pkcs12 -k "$KEYCHAIN" -T /usr/bin/codesign
+            -A -f pkcs12 -k "$KEYCHAIN" -T /usr/bin/codesign 2>&1 || echo "IMPORT rc=$?"
+          echo "== certificates in keychain =="
+          security find-certificate -a "$KEYCHAIN" | grep -c "keychain" || true
           security set-key-partition-list -S apple-tool:,apple:,codesign: \
-            -s -k "$KEYCHAIN_PW" "$KEYCHAIN" >/dev/null
+            -s -k "$KEYCHAIN_PW" "$KEYCHAIN" >/dev/null 2>&1 || echo "partition-list rc=$?"
           # Make this keychain visible to codesign/notarytool.
           security list-keychain -d user -s "$KEYCHAIN" login.keychain-db
-          # NOTE: no `-v` here. In a fresh isolated keychain the cert isn't
-          # trust-evaluated, so `-v` (valid only) would hide it even though the
-          # cert + private key are present. codesign still builds the full chain
-          # from the runner's system intermediates.
           echo "Identities in signing keychain:"
           security find-identity -p codesigning "$KEYCHAIN" || true
           IDENTITY="$(security find-identity -p codesigning "$KEYCHAIN" \
