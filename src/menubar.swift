@@ -141,7 +141,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var triggerWasActive = false
     private var pausedByUs = false
     private var pauseReason = ""      // "call" or "audio" — why we're holding a pause
-    private var audioSeenTicks = 0    // debounce: consecutive ticks other-app audio seen
+    private var audioActiveSince: Date?  // when other-app audio was first seen (debounce)
+    private let audioConfirmSeconds = 1.2 // other-app audio must persist this long to pause
 
     private let defaults = UserDefaults.standard
     private var enabled: Bool {
@@ -219,7 +220,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     @objc private func toggleOtherAudio() {
         pauseOnOtherAudio.toggle()
         audioToggleItem.state = pauseOnOtherAudio ? .on : .off
-        audioSeenTicks = 0
+        audioActiveSince = nil
         // If turning off an audio-triggered pause (and not in a call), resume now.
         if !pauseOnOtherAudio && pausedByUs && pauseReason == "audio" && !micActive() {
             if musicRunning() { musicPlay() }
@@ -231,14 +232,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     private func tick() {
         // Mic (a call) always triggers. Other-app audio triggers only when enabled,
-        // and must persist for 2 ticks so brief notification sounds are ignored.
+        // and must persist for `audioConfirmSeconds` so brief notification sounds are
+        // ignored. Resume, however, happens on the very next poll once audio clears.
         let mic = micActive()
         var audioActive = false
         if pauseOnOtherAudio {
-            if otherAudioSource() != nil { audioSeenTicks += 1 } else { audioSeenTicks = 0 }
-            audioActive = audioSeenTicks >= 2
+            if otherAudioSource() != nil {
+                if audioActiveSince == nil { audioActiveSince = Date() }
+                audioActive = Date().timeIntervalSince(audioActiveSince!) >= audioConfirmSeconds
+            } else {
+                audioActiveSince = nil
+            }
         } else {
-            audioSeenTicks = 0
+            audioActiveSince = nil
         }
 
         let active = mic || audioActive
