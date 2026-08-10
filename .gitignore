@@ -9,3 +9,6 @@ micstate
 
 # Local state / logs
 *.log
+
+# Build artifacts
+dist/
