@@ -54,7 +54,13 @@ jobs:
             -s -k "$KEYCHAIN_PW" "$KEYCHAIN" >/dev/null
           # Make this keychain visible to codesign/notarytool.
           security list-keychain -d user -s "$KEYCHAIN" login.keychain-db
-          IDENTITY="$(security find-identity -v -p codesigning "$KEYCHAIN" \
+          # NOTE: no `-v` here. In a fresh isolated keychain the cert isn't
+          # trust-evaluated, so `-v` (valid only) would hide it even though the
+          # cert + private key are present. codesign still builds the full chain
+          # from the runner's system intermediates.
+          echo "Identities in signing keychain:"
+          security find-identity -p codesigning "$KEYCHAIN" || true
+          IDENTITY="$(security find-identity -p codesigning "$KEYCHAIN" \
             | grep 'Developer ID Application' | head -1 | sed -E 's/.*"(.*)".*/\1/')"
           if [ -z "$IDENTITY" ]; then
             echo "::error::No Developer ID Application identity found in imported keychain."
