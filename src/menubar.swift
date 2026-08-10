@@ -73,22 +73,85 @@ private func musicState() -> String { runAppleScript(#"tell application "Music" 
 private func musicPause() { runAppleScript(#"tell application "Music" to pause"#) }
 private func musicPlay()  { runAppleScript(#"tell application "Music" to play"#) }
 
+// MARK: - Other-app audio output detection (CoreAudio process objects) -----------
+//
+// macOS 14.2+ exposes an AudioObject per process that is using audio. We list
+// them and check `kAudioProcessPropertyIsRunningOutput` to see which apps are
+// currently playing sound. This lets us optionally pause Music when audio starts
+// coming from *another* app (e.g. a video in a browser) — using only public
+// CoreAudio APIs, no private frameworks, and it works under the Hardened Runtime.
+
+private let selfBundleID = Bundle.main.bundleIdentifier ?? "com.zsoldier.mic-music-pause"
+
+private func audioProcessObjects() -> [AudioObjectID] {
+    var addr = prop(kAudioHardwarePropertyProcessObjectList)
+    var size = UInt32(0)
+    guard AudioObjectGetPropertyDataSize(AudioObjectID(kAudioObjectSystemObject), &addr, 0, nil, &size) == noErr,
+          size > 0 else { return [] }
+    let n = Int(size) / MemoryLayout<AudioObjectID>.size
+    var ids = [AudioObjectID](repeating: 0, count: n)
+    guard AudioObjectGetPropertyData(AudioObjectID(kAudioObjectSystemObject), &addr, 0, nil, &size, &ids) == noErr else { return [] }
+    return ids
+}
+
+private func processBundleID(_ o: AudioObjectID) -> String {
+    var addr = prop(kAudioProcessPropertyBundleID)
+    var size = UInt32(0)
+    guard AudioObjectGetPropertyDataSize(o, &addr, 0, nil, &size) == noErr, size > 0 else { return "" }
+    var cf: CFString?
+    var sz = UInt32(MemoryLayout<CFString?>.size)
+    let st = withUnsafeMutablePointer(to: &cf) {
+        AudioObjectGetPropertyData(o, &addr, 0, nil, &sz, $0)
+    }
+    if st == noErr, let s = cf { return s as String }
+    return ""
+}
+
+private func processIsOutputting(_ o: AudioObjectID) -> Bool {
+    var addr = prop(kAudioProcessPropertyIsRunningOutput)
+    var sz = UInt32(0)
+    guard AudioObjectGetPropertyDataSize(o, &addr, 0, nil, &sz) == noErr else { return false }
+    var v = UInt32(0); sz = UInt32(MemoryLayout<UInt32>.size)
+    guard AudioObjectGetPropertyData(o, &addr, 0, nil, &sz, &v) == noErr else { return false }
+    return v != 0
+}
+
+/// The bundle id of some *other* app (not Music, not us) currently playing audio,
+/// or nil if nothing else is. We require a non-empty bundle id so transient
+/// system sounds and CLI helpers (e.g. afplay/notifications) don't count.
+func otherAudioSource() -> String? {
+    for o in audioProcessObjects() where processIsOutputting(o) {
+        let bid = processBundleID(o)
+        if bid.isEmpty || bid == "com.apple.Music" || bid == selfBundleID { continue }
+        return bid
+    }
+    return nil
+}
+
 // MARK: - App delegate / menu bar UI --------------------------------------------
 
 final class AppDelegate: NSObject, NSApplicationDelegate {
     private var statusItem: NSStatusItem!
     private var toggleItem: NSMenuItem!
+    private var audioToggleItem: NSMenuItem!
     private var callInfoItem: NSMenuItem!
     private var musicInfoItem: NSMenuItem!
     private var timer: Timer?
 
-    private var micWasActive = false
+    private var triggerWasActive = false
     private var pausedByUs = false
+    private var pauseReason = ""      // "call" or "audio" — why we're holding a pause
+    private var audioSeenTicks = 0    // debounce: consecutive ticks other-app audio seen
 
     private let defaults = UserDefaults.standard
     private var enabled: Bool {
         get { defaults.object(forKey: "autoPauseEnabled") as? Bool ?? true }
         set { defaults.set(newValue, forKey: "autoPauseEnabled") }
+    }
+    // Optional: also pause when audio starts playing from another app (default off).
+    private var pauseOnOtherAudio: Bool {
+        get { defaults.object(forKey: "pauseOnOtherAudioEnabled") as? Bool ?? false }
+        set { defaults.set(newValue, forKey: "pauseOnOtherAudioEnabled") }
     }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
@@ -98,7 +161,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let t = Timer(timeInterval: 2.0, repeats: true) { [weak self] _ in self?.tick() }
         RunLoop.main.add(t, forMode: .common)
         timer = t
-        NSLog("mic-music-pause menu bar started (enabled=\(enabled))")
+        NSLog("mic-music-pause menu bar started (enabled=\(enabled), pauseOnOtherAudio=\(pauseOnOtherAudio))")
 
         // Prime the Automation permission prompt now (with our clear explanation)
         // instead of surprising the user mid-call. Only if Music is already running
@@ -116,6 +179,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         toggleItem.target = self
         toggleItem.state = enabled ? .on : .off
         menu.addItem(toggleItem)
+
+        audioToggleItem = NSMenuItem(title: "Also pause for audio from other apps",
+                                     action: #selector(toggleOtherAudio), keyEquivalent: "")
+        audioToggleItem.target = self
+        audioToggleItem.state = pauseOnOtherAudio ? .on : .off
+        menu.addItem(audioToggleItem)
 
         menu.addItem(.separator())
 
@@ -144,30 +213,56 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             pausedByUs = false
         }
         NSLog("mic-music-pause auto-pause \(enabled ? "enabled" : "disabled")")
-        refresh(active: micWasActive)
+        tick()
+    }
+
+    @objc private func toggleOtherAudio() {
+        pauseOnOtherAudio.toggle()
+        audioToggleItem.state = pauseOnOtherAudio ? .on : .off
+        audioSeenTicks = 0
+        // If turning off an audio-triggered pause (and not in a call), resume now.
+        if !pauseOnOtherAudio && pausedByUs && pauseReason == "audio" && !micActive() {
+            if musicRunning() { musicPlay() }
+            pausedByUs = false
+        }
+        NSLog("mic-music-pause pause-on-other-audio \(pauseOnOtherAudio ? "enabled" : "disabled")")
+        tick()
     }
 
     private func tick() {
-        let active = micActive()
+        // Mic (a call) always triggers. Other-app audio triggers only when enabled,
+        // and must persist for 2 ticks so brief notification sounds are ignored.
+        let mic = micActive()
+        var audioActive = false
+        if pauseOnOtherAudio {
+            if otherAudioSource() != nil { audioSeenTicks += 1 } else { audioSeenTicks = 0 }
+            audioActive = audioSeenTicks >= 2
+        } else {
+            audioSeenTicks = 0
+        }
+
+        let active = mic || audioActive
+        let reason = mic ? "call" : (audioActive ? "audio" : "")
+
         if enabled {
-            if active && !micWasActive {
+            if active && !triggerWasActive {
                 if musicRunning() && musicState() == "playing" {
-                    musicPause(); pausedByUs = true
-                    NSLog("mic active -> paused Music")
+                    musicPause(); pausedByUs = true; pauseReason = reason
+                    NSLog("\(reason) active -> paused Music")
                 }
-            } else if !active && micWasActive {
+            } else if !active && triggerWasActive {
                 if pausedByUs {
                     if musicRunning() { musicPlay() }
                     pausedByUs = false
-                    NSLog("mic released -> resumed Music")
+                    NSLog("trigger cleared -> resumed Music")
                 }
             }
         }
-        micWasActive = active
-        refresh(active: active)
+        triggerWasActive = active
+        refresh(active: active, reason: reason)
     }
 
-    private func refresh(active: Bool) {
+    private func refresh(active: Bool, reason: String = "") {
         guard let button = statusItem.button else { return }
         let symbol = (enabled && pausedByUs) ? "pause.circle.fill" : "music.note"
         let image = NSImage(systemSymbolName: symbol, accessibilityDescription: "mic-music-pause")
@@ -175,10 +270,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         button.image = image
         button.alphaValue = enabled ? 1.0 : 0.45
         button.toolTip = enabled
-            ? (active ? "In a call — music will pause" : "Idle")
+            ? (active ? "Music will pause" : "Idle")
             : "Auto-pause disabled"
 
-        callInfoItem?.title = active ? "● In a call" : "○ Idle"
+        let label: String
+        switch reason {
+        case "call":  label = "● In a call"
+        case "audio": label = "● Other audio playing"
+        default:      label = "○ Idle"
+        }
+        callInfoItem?.title = label
         let state = musicRunning() ? musicState() : "not running"
         musicInfoItem?.title = "Music: \(state.isEmpty ? "unknown" : state)"
     }

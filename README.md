@@ -17,6 +17,9 @@ The background service runs as a **menu bar app** (a small music-note icon, no D
 icon). Click it to:
 
 - **Auto-pause music on calls** — check/uncheck to turn the behavior on or off.
+- **Also pause for audio from other apps** — optional (off by default). When on,
+  Music also pauses if another app (e.g. a video in your browser) starts playing
+  audio, and resumes when it stops.
 - See live status: whether you are **in a call** and the current **Music** state.
 - **Quit** the app.
 
@@ -96,6 +99,11 @@ mic-music-pause help
   via `osascript`, and exposes the on/off toggle. It only pauses if Music was
   *playing*, and only resumes if it was the one that paused — so it never hijacks
   playback you paused yourself.
+- The optional "pause for audio from other apps" toggle uses CoreAudio per-process
+  audio objects (`kAudioHardwarePropertyProcessObjectList` +
+  `kAudioProcessPropertyIsRunningOutput`, macOS 14.2+) to see which apps are playing
+  sound, ignoring Music itself. A short debounce keeps brief notification chimes from
+  triggering a pause.
 - `bin/mic-music-pause` is a CLI for manual/headless use (`status`, `watch`, etc.).
 
 ## Notes / caveats
@@ -103,6 +111,8 @@ mic-music-pause help
 - Some USB speakerphones keep their mic engine running continuously. If Music pauses
   when you are *not* in a call, that device is the cause.
 - The trigger is "microphone in use," so it reacts to any call app. That is by design.
+- "Pause for audio from other apps" only counts apps with a bundle id, so transient
+  system sounds and command-line players are ignored.
 
 ## Releasing (maintainers)
 
