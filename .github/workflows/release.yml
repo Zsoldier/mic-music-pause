@@ -141,10 +141,11 @@ jobs:
           TAG="$GITHUB_REF_NAME"
           VERSION="${TAG#v}"
           ASSET="dist/mic-music-pause-${VERSION}-macos.tar.gz"
+          DMG="dist/mic-music-pause-${VERSION}.dmg"
           if gh release view "$TAG" >/dev/null 2>&1; then
-            gh release upload "$TAG" "$ASSET" --clobber
+            gh release upload "$TAG" "$ASSET" "$DMG" --clobber
           else
-            gh release create "$TAG" "$ASSET" --title "$TAG" --generate-notes
+            gh release create "$TAG" "$ASSET" "$DMG" --title "$TAG" --generate-notes
           fi
 
       - name: Update Homebrew tap formula

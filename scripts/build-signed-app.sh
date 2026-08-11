@@ -90,6 +90,25 @@ xcrun stapler staple "$APP"
 xcrun stapler validate "$APP"
 spctl --assess --type execute --verbose=4 "$APP" || true
 
+echo "==> Building DMG (drag-to-Applications installer)"
+# Direct-download artifact: users grab this from the GitHub release and drag the
+# app to /Applications — no Homebrew and no Xcode tools required. The app inside
+# is already notarized+stapled; we also sign, notarize, and staple the DMG so it
+# opens without a Gatekeeper prompt even offline.
+DMG="$OUT_DIR/mic-music-pause-${VERSION}.dmg"
+DMG_STAGE="$WORK/dmg"
+mkdir -p "$DMG_STAGE"
+cp -R "$APP" "$DMG_STAGE/mic-music-pause.app"
+ln -s /Applications "$DMG_STAGE/Applications"
+rm -f "$DMG"
+hdiutil create -volname "mic-music-pause" -srcfolder "$DMG_STAGE" \
+  -fs HFS+ -format UDZO -ov "$DMG"
+codesign --force --timestamp --sign "$DEVELOPER_ID_APP" "$DMG"
+echo "==> Notarizing DMG (this can take a few minutes)"
+xcrun notarytool submit "$DMG" "${NOTARY_ARGS[@]}" --wait
+xcrun stapler staple "$DMG"
+xcrun stapler validate "$DMG"
+
 echo "==> Packaging tarball"
 # Wrap the .app in a parent dir: Homebrew strips the single top-level directory
 # when staging a resource, so without this it would land *inside* the bundle.
@@ -101,8 +120,9 @@ SHA="$(shasum -a 256 "$TARBALL" | awk '{print $1}')"
 
 echo
 echo "Done."
-echo "  Artifact: $TARBALL"
-echo "  sha256:   $SHA"
+echo "  Homebrew tarball: $TARBALL"
+echo "  sha256:           $SHA"
+echo "  DMG (direct):     $DMG"
 echo
 echo "Next: attach the tarball to the GitHub release for v${VERSION}, then set the"
 echo "formula's url to that asset and sha256 to the value above."

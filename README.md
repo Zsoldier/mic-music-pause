@@ -36,9 +36,22 @@ Control Center, so the menu bar is the native equivalent.
 ## Requirements
 
 - macOS (Apple Silicon or Intel)
-- Xcode Command Line Tools (`xcode-select --install`) — provides `swiftc`, used at
-  install time to build the tiny detector.
 - Apple Music (the `Music.app` that ships with macOS).
+- Xcode Command Line Tools (`xcode-select --install`) — **only** for the Homebrew
+  install path, which compiles a tiny detector at install time. The direct DMG
+  download below needs no developer tools.
+
+## Download (no Homebrew, no Xcode tools)
+
+1. Grab the latest **`mic-music-pause-<version>.dmg`** from the
+   [Releases page](https://github.com/Zsoldier/mic-music-pause/releases/latest).
+2. Open the DMG and drag **mic-music-pause** into **Applications**.
+3. Launch it from Applications (it lives in the menu bar — no Dock icon).
+4. Click the menu bar icon and enable **Start at login**.
+
+The app is Developer ID–signed and notarized by Apple, so it opens without any
+Gatekeeper warnings. Updates: the menu shows "Update available" when a newer
+release exists and opens the Releases page so you can download the new DMG.
 
 ## Install (Homebrew)
 

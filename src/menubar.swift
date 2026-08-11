@@ -384,8 +384,24 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// file launches Terminal independently, so it survives brew restarting our
     /// service, and it needs no extra automation permission.
     @objc private func openUpdate() {
-        let brew = FileManager.default.fileExists(atPath: "/opt/homebrew/bin/brew")
-            ? "/opt/homebrew/bin/brew" : "/usr/local/bin/brew"
+        let releasesPage = URL(string: "https://github.com/Zsoldier/mic-music-pause/releases/latest")!
+
+        // Resolve symlinks so a launch via Homebrew's opt/ symlink still reveals
+        // the real Cellar path. Only drive `brew upgrade` for a Homebrew install;
+        // a directly-downloaded (DMG) app has no brew formula to upgrade.
+        let resolvedPath = URL(fileURLWithPath: Bundle.main.bundlePath)
+            .resolvingSymlinksInPath().path
+        let brewPath = ["/opt/homebrew/bin/brew", "/usr/local/bin/brew"]
+            .first { FileManager.default.fileExists(atPath: $0) }
+        let isHomebrew = resolvedPath.contains("/Cellar/mic-music-pause/") && brewPath != nil
+
+        guard isHomebrew, let brew = brewPath else {
+            // Direct download: send the user to the Releases page to grab the
+            // latest DMG.
+            NSWorkspace.shared.open(releasesPage)
+            return
+        }
+
         let script = """
         #!/bin/bash
         echo "Upgrading mic-music-pause…"
@@ -404,9 +420,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             NSWorkspace.shared.open(URL(fileURLWithPath: path))
         } catch {
             // Fallback: open the releases page so the user can update manually.
-            if let url = URL(string: "https://github.com/Zsoldier/mic-music-pause/releases/latest") {
-                NSWorkspace.shared.open(url)
-            }
+            NSWorkspace.shared.open(releasesPage)
         }
     }
 
