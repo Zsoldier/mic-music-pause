@@ -26,6 +26,13 @@ icon). Click it to:
   (uses macOS Login Items).
 - **Update available: vX.Y.Z** — appears only when a newer release exists on the
   tap. Click it to run `brew upgrade` in Terminal.
+- **Diagnostics…** — opens a live troubleshooter window that shows all your input
+  devices (naming each and its connection type, e.g. "Blue Yeti (USB)") and which
+  are **ACTIVE (in use)**, which apps are currently playing audio, screen-lock
+  state, whether Apple Music is running plus its Automation-permission status, and
+  whether the app is currently holding a pause and why. Handy for answering
+  "why did/didn't my music pause?" — a **Copy** button grabs the report for bug
+  reports.
 - See live status: whether you are **in a call** and the current **Music** state.
 - **Quit** the app.
 

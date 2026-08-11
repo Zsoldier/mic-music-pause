@@ -129,6 +129,111 @@ func otherAudioSource() -> String? {
     return nil
 }
 
+// MARK: - Diagnostics helpers ---------------------------------------------------
+//
+// Backing data for the "Diagnostics…" troubleshooter window: human-readable
+// names for audio devices, which inputs are live, which apps are outputting,
+// the Automation permission state for Music, and how this copy was installed.
+
+private func audioObjectString(_ o: AudioObjectID, _ selector: AudioObjectPropertySelector) -> String {
+    var addr = prop(selector)
+    var cf: Unmanaged<CFString>?
+    var sz = UInt32(MemoryLayout<CFString?>.size)
+    let st = withUnsafeMutablePointer(to: &cf) {
+        AudioObjectGetPropertyData(o, &addr, 0, nil, &sz, $0)
+    }
+    if st == noErr, let s = cf?.takeRetainedValue() { return s as String }
+    return ""
+}
+
+private func deviceTransport(_ d: AudioDeviceID) -> String {
+    var addr = prop(kAudioDevicePropertyTransportType)
+    var t = UInt32(0)
+    var sz = UInt32(MemoryLayout<UInt32>.size)
+    guard AudioObjectGetPropertyData(d, &addr, 0, nil, &sz, &t) == noErr else { return "Unknown" }
+    switch t {
+    case kAudioDeviceTransportTypeBuiltIn:    return "Built-in"
+    case kAudioDeviceTransportTypeUSB:        return "USB"
+    case kAudioDeviceTransportTypeBluetooth,
+         kAudioDeviceTransportTypeBluetoothLE: return "Bluetooth"
+    case kAudioDeviceTransportTypeHDMI:       return "HDMI"
+    case kAudioDeviceTransportTypeDisplayPort: return "DisplayPort"
+    case kAudioDeviceTransportTypeThunderbolt: return "Thunderbolt"
+    case kAudioDeviceTransportTypeFireWire:   return "FireWire"
+    case kAudioDeviceTransportTypePCI:        return "PCI"
+    case kAudioDeviceTransportTypeAirPlay:    return "AirPlay"
+    case kAudioDeviceTransportTypeVirtual:    return "Virtual"
+    case kAudioDeviceTransportTypeAggregate:  return "Aggregate"
+    case kAudioDeviceTransportTypeContinuityCaptureWired,
+         kAudioDeviceTransportTypeContinuityCaptureWireless: return "Continuity"
+    default:                                  return "Other"
+    }
+}
+
+struct InputDeviceInfo {
+    let name: String
+    let transport: String
+    let running: Bool
+}
+
+/// Every input-capable audio device with its name, connection type, and whether
+/// it is currently in use (mic live).
+func inputDeviceInfos() -> [InputDeviceInfo] {
+    audioDevices().filter { hasInput($0) }.map { d in
+        var name = audioObjectString(d, kAudioObjectPropertyName)
+        if name.isEmpty { name = "Unnamed device" }
+        return InputDeviceInfo(name: name, transport: deviceTransport(d), running: isRunning(d))
+    }
+}
+
+/// Friendly app name for a bundle id, falling back to the id itself.
+func appName(forBundleID bid: String) -> String {
+    if let url = NSWorkspace.shared.urlForApplication(withBundleIdentifier: bid) {
+        let n = FileManager.default.displayName(atPath: url.path)
+        if !n.isEmpty { return n.hasSuffix(".app") ? String(n.dropLast(4)) : n }
+    }
+    return bid
+}
+
+/// Bundle ids of every app (except us) currently outputting audio.
+func outputtingApps() -> [String] {
+    var out: [String] = []
+    for o in audioProcessObjects() where processIsOutputting(o) {
+        let bid = processBundleID(o)
+        if bid.isEmpty || bid == selfBundleID { continue }
+        out.append(bid)
+    }
+    return out
+}
+
+/// Automation (Apple Events) permission state for controlling Music.
+func musicAutomationPermission() -> String {
+    guard musicRunning() else { return "Unknown — Music isn't running" }
+    let target = NSAppleEventDescriptor(bundleIdentifier: "com.apple.Music")
+    guard let ae = target.aeDesc else { return "Unknown" }
+    let status = AEDeterminePermissionToAutomateTarget(ae, typeWildCard, typeWildCard, false)
+    switch status {
+    case noErr:
+        return "Granted"
+    case OSStatus(errAEEventNotPermitted):
+        return "Denied — turn on under System Settings ▸ Privacy & Security ▸ Automation"
+    case OSStatus(errAEEventWouldRequireUserConsent):
+        return "Not yet granted — you'll be asked the first time music is paused"
+    case OSStatus(procNotFound):
+        return "Unknown — Music isn't running"
+    default:
+        return "Unknown (status \(status))"
+    }
+}
+
+/// How this build was installed, for support triage.
+func installSource() -> String {
+    let resolved = URL(fileURLWithPath: Bundle.main.bundlePath).resolvingSymlinksInPath().path
+    if resolved.contains("/Cellar/mic-music-pause/") { return "Homebrew" }
+    if resolved.hasPrefix("/Applications/") { return "Direct download (DMG)" }
+    return "Other — \(resolved)"
+}
+
 // MARK: - App delegate / menu bar UI --------------------------------------------
 
 final class AppDelegate: NSObject, NSApplicationDelegate {
@@ -142,6 +247,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var updateItem: NSMenuItem!
     private var timer: Timer?
     private var updateTimer: Timer?
+
+    private var diagnosticsWindow: NSWindow?
+    private var diagnosticsTextView: NSTextView?
+    private var diagnosticsTimer: Timer?
 
     private var triggerWasActive = false
     private var pausedByUs = false
@@ -260,6 +369,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         updateItem.target = self
         updateItem.isHidden = true   // shown only when a newer release is found
         menu.addItem(updateItem)
+
+        let diagnostics = NSMenuItem(title: "Diagnostics…",
+                                     action: #selector(showDiagnostics), keyEquivalent: "")
+        diagnostics.target = self
+        menu.addItem(diagnostics)
 
         menu.addItem(.separator())
 
@@ -424,6 +538,164 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
     }
 
+    // MARK: Diagnostics window (troubleshooter)
+
+    @objc private func showDiagnostics() {
+        if diagnosticsWindow == nil {
+            let w = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 560, height: 480),
+                             styleMask: [.titled, .closable, .resizable],
+                             backing: .buffered, defer: false)
+            w.title = "mic-music-pause — Diagnostics"
+            w.isReleasedWhenClosed = false
+            w.delegate = self
+            w.minSize = NSSize(width: 420, height: 320)
+
+            let content = NSView(frame: w.contentView!.bounds)
+            content.autoresizingMask = [.width, .height]
+
+            let scroll = NSScrollView(frame: NSRect(x: 0, y: 44, width: 560, height: 436))
+            scroll.autoresizingMask = [.width, .height]
+            scroll.hasVerticalScroller = true
+            scroll.borderType = .noBorder
+
+            let tv = NSTextView(frame: scroll.bounds)
+            tv.autoresizingMask = [.width]
+            tv.isEditable = false
+            tv.isRichText = false
+            tv.drawsBackground = true
+            tv.font = NSFont.monospacedSystemFont(ofSize: 12, weight: .regular)
+            tv.textContainerInset = NSSize(width: 10, height: 10)
+            scroll.documentView = tv
+            diagnosticsTextView = tv
+
+            let copyBtn = NSButton(title: "Copy", target: self, action: #selector(copyDiagnostics))
+            copyBtn.frame = NSRect(x: 12, y: 8, width: 120, height: 28)
+            copyBtn.bezelStyle = .rounded
+            copyBtn.autoresizingMask = [.maxXMargin, .maxYMargin]
+
+            let refreshBtn = NSButton(title: "Refresh", target: self, action: #selector(refreshDiagnostics))
+            refreshBtn.frame = NSRect(x: 560 - 132, y: 8, width: 120, height: 28)
+            refreshBtn.bezelStyle = .rounded
+            refreshBtn.autoresizingMask = [.minXMargin, .maxYMargin]
+
+            content.addSubview(scroll)
+            content.addSubview(copyBtn)
+            content.addSubview(refreshBtn)
+            w.contentView = content
+            w.center()
+            diagnosticsWindow = w
+        }
+
+        // (Re)start the live-refresh timer — it's torn down when the window
+        // closes, so reopening needs a fresh one.
+        if diagnosticsTimer == nil {
+            let dt = Timer(timeInterval: 1.5, repeats: true) { [weak self] _ in
+                self?.updateDiagnosticsText()
+            }
+            RunLoop.main.add(dt, forMode: .common)
+            diagnosticsTimer = dt
+        }
+        updateDiagnosticsText()
+        NSApp.activate(ignoringOtherApps: true)
+        diagnosticsWindow?.makeKeyAndOrderFront(nil)
+    }
+
+    @objc private func refreshDiagnostics() { updateDiagnosticsText() }
+
+    @objc private func copyDiagnostics() {
+        let pb = NSPasteboard.general
+        pb.clearContents()
+        pb.setString(diagnosticsReport(), forType: .string)
+    }
+
+    private func updateDiagnosticsText() {
+        diagnosticsTextView?.string = diagnosticsReport()
+    }
+
+    private func diagnosticsReport() -> String {
+        func yn(_ b: Bool) -> String { b ? "yes" : "no" }
+        func onoff(_ b: Bool) -> String { b ? "ON" : "off" }
+
+        var out = ""
+        out += "mic-music-pause — diagnostics\n"
+        out += "=============================\n"
+        out += "Version:        \(appVersion)\n"
+        out += "Installed via:  \(installSource())\n"
+        if #available(macOS 13.0, *) {
+            out += "Start at login: \(onoff(SMAppService.mainApp.status == .enabled))\n"
+        }
+        out += "\n"
+
+        out += "Settings\n"
+        out += "  Auto-pause on calls:            \(onoff(enabled))\n"
+        out += "  Also pause for other-app audio: \(onoff(pauseOnOtherAudio))\n"
+        out += "  Also pause when screen locks:   \(onoff(pauseOnScreenLock))\n"
+        out += "\n"
+
+        let inputs = inputDeviceInfos()
+        let activeInputs = inputs.filter { $0.running }
+        out += "Microphone / input devices\n"
+        if inputs.isEmpty {
+            out += "  (no input devices found)\n"
+        } else {
+            for d in inputs {
+                let mark = d.running ? "● ACTIVE (in use)" : "○ idle"
+                out += "  \(mark)  \(d.name) (\(d.transport))\n"
+            }
+        }
+        out += "  → Call detected (a mic is in use): \(yn(!activeInputs.isEmpty))"
+        if let first = activeInputs.first {
+            out += "  — \(first.name) (\(first.transport))"
+        }
+        out += "\n\n"
+
+        let outputting = outputtingApps()
+        let others = outputting.filter { $0 != "com.apple.Music" }
+        out += "Audio output (other apps)\n"
+        if outputting.isEmpty {
+            out += "  Nothing is playing audio right now.\n"
+        } else {
+            for bid in outputting {
+                let tag = bid == "com.apple.Music" ? "  [Apple Music]" : ""
+                out += "  ♪ \(appName(forBundleID: bid)) (\(bid))\(tag)\n"
+            }
+        }
+        if !pauseOnOtherAudio && !others.isEmpty {
+            out += "  Note: 'pause for other-app audio' is off, so this won't trigger a pause.\n"
+        }
+        out += "\n"
+
+        out += "Screen\n"
+        out += "  Locked: \(yn(screenLocked))\n"
+        out += "\n"
+
+        out += "Apple Music\n"
+        let running = musicRunning()
+        out += "  Running:               \(yn(running))\n"
+        out += "  Player state:          \(running ? (musicState().isEmpty ? "unknown" : musicState()) : "not running")\n"
+        out += "  Automation permission: \(musicAutomationPermission())\n"
+        out += "\n"
+
+        out += "Current status\n"
+        if pausedByUs {
+            let why: String
+            switch pauseReason {
+            case "call":  why = "you're in a call"
+            case "audio": why = "another app is playing audio"
+            case "lock":  why = "the screen is locked"
+            default:      why = pauseReason
+            }
+            out += "  Holding music paused: yes — because \(why).\n"
+        } else {
+            out += "  Holding music paused: no.\n"
+        }
+
+        let f = DateFormatter()
+        f.dateFormat = "yyyy-MM-dd HH:mm:ss"
+        out += "\nSnapshot: \(f.string(from: Date()))  (updates live)\n"
+        return out
+    }
+
     private func tick() {
         // Mic (a call) always triggers. Other-app audio triggers only when enabled,
         // and must persist for `audioConfirmSeconds` so brief notification sounds are
@@ -483,6 +755,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         callInfoItem?.title = label
         let state = musicRunning() ? musicState() : "not running"
         musicInfoItem?.title = "Music: \(state.isEmpty ? "unknown" : state)"
+    }
+}
+
+// MARK: - Diagnostics window lifecycle ------------------------------------------
+
+extension AppDelegate: NSWindowDelegate {
+    func windowWillClose(_ notification: Notification) {
+        guard (notification.object as? NSWindow) === diagnosticsWindow else { return }
+        diagnosticsTimer?.invalidate()
+        diagnosticsTimer = nil
     }
 }
 
