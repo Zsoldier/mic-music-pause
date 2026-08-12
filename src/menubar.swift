@@ -255,8 +255,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var triggerWasActive = false
     private var pausedByUs = false
     private var pauseReason = ""      // "call", "audio", or "lock" — why we're holding a pause
-    private var audioActiveSince: Date?  // when other-app audio was first seen (debounce)
-    private let audioConfirmSeconds = 1.2 // other-app audio must persist this long to pause
+    private var audioActiveSince: Date?  // when the current other-app audio source was first seen (debounce)
+    private var audioActiveSource: String?  // bundle id of that source; a change restarts the debounce
+    private let audioConfirmSeconds = 3.0 // the SAME source must play this long to pause (rejects notification dings)
     private var screenLocked = false     // updated by screen lock/unlock notifications
 
     // This build's version (from Info.plist) and the latest seen on GitHub.
@@ -399,6 +400,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         pauseOnOtherAudio.toggle()
         audioToggleItem.state = pauseOnOtherAudio ? .on : .off
         audioActiveSince = nil
+        audioActiveSource = nil
         // If turning off an audio-triggered pause (and not in a call), resume now.
         if !pauseOnOtherAudio && pausedByUs && pauseReason == "audio" && !micActive() {
             if musicRunning() { musicPlay() }
@@ -698,19 +700,28 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     private func tick() {
         // Mic (a call) always triggers. Other-app audio triggers only when enabled,
-        // and must persist for `audioConfirmSeconds` so brief notification sounds are
-        // ignored. Resume, however, happens on the very next poll once audio clears.
+        // and the SAME source must keep playing for `audioConfirmSeconds` so brief
+        // notification dings (which don't sustain that long) are ignored. Resume,
+        // however, happens on the very next poll once audio clears.
         let mic = micActive()
         var audioActive = false
         if pauseOnOtherAudio {
-            if otherAudioSource() != nil {
-                if audioActiveSince == nil { audioActiveSince = Date() }
-                audioActive = Date().timeIntervalSince(audioActiveSince!) >= audioConfirmSeconds
+            if let src = otherAudioSource() {
+                // A new/changed source restarts the confirmation window, so a short
+                // ding from one app can't add its time to unrelated blips from
+                // another — only genuinely sustained playback from one source counts.
+                if src != audioActiveSource {
+                    audioActiveSource = src
+                    audioActiveSince = Date()
+                }
+                audioActive = Date().timeIntervalSince(audioActiveSince ?? Date()) >= audioConfirmSeconds
             } else {
                 audioActiveSince = nil
+                audioActiveSource = nil
             }
         } else {
             audioActiveSince = nil
+            audioActiveSource = nil
         }
 
         let active = mic || audioActive || (pauseOnScreenLock && screenLocked)
