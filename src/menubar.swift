@@ -117,13 +117,65 @@ private func processIsOutputting(_ o: AudioObjectID) -> Bool {
     return v != 0
 }
 
-/// The bundle id of some *other* app (not Music, not us) currently playing audio,
-/// or nil if nothing else is. We require a non-empty bundle id so transient
-/// system sounds and CLI helpers (e.g. afplay/notifications) don't count.
-func otherAudioSource() -> String? {
+private func processPID(_ o: AudioObjectID) -> pid_t {
+    var addr = prop(kAudioProcessPropertyPID)
+    var pid = pid_t(-1)
+    var sz = UInt32(MemoryLayout<pid_t>.size)
+    guard AudioObjectGetPropertyData(o, &addr, 0, nil, &sz, &pid) == noErr else { return -1 }
+    return pid
+}
+
+/// Best-effort human identity for an audio process: prefer the bundle id's app
+/// name, then the running app's localized name, then the executable name, so a
+/// silent background process holding an output stream is never a mystery.
+private func processIdentity(_ o: AudioObjectID) -> (name: String, bundleID: String, pid: pid_t) {
+    let bid = processBundleID(o)
+    let pid = processPID(o)
+    var name = ""
+    if !bid.isEmpty { name = appName(forBundleID: bid) }
+    if name.isEmpty || name == bid, pid > 0,
+       let ra = NSRunningApplication(processIdentifier: pid) {
+        name = ra.localizedName ?? ra.bundleURL?.deletingPathExtension().lastPathComponent ?? name
+    }
+    if name.isEmpty, pid > 0 {
+        var buf = [CChar](repeating: 0, count: 256)
+        if proc_name(pid, &buf, UInt32(buf.count)) > 0 {
+            name = String(cString: buf)
+        }
+    }
+    if name.isEmpty { name = bid.isEmpty ? "Unknown process" : bid }
+    return (name, bid, pid)
+}
+
+/// Identity of every process that is *currently outputting* audio, excluding
+/// ourselves. Includes processes with no bundle id (resolved by PID/executable
+/// name) so a silent stream-holder is never hidden.
+struct AudioOutputProcess {
+    let name: String
+    let bundleID: String
+    let pid: pid_t
+}
+
+func outputtingProcesses() -> [AudioOutputProcess] {
+    var out: [AudioOutputProcess] = []
     for o in audioProcessObjects() where processIsOutputting(o) {
-        let bid = processBundleID(o)
-        if bid.isEmpty || bid == "com.apple.Music" || bid == selfBundleID { continue }
+        let id = processIdentity(o)
+        if id.bundleID == selfBundleID { continue }
+        out.append(AudioOutputProcess(name: id.name, bundleID: id.bundleID, pid: id.pid))
+    }
+    return out
+}
+
+/// The bundle id of some *other* app (not Music, not us, not ignored) currently
+/// playing audio, or nil if nothing qualifying is. We require a non-empty bundle
+/// id so transient system sounds and CLI helpers (e.g. afplay/notifications)
+/// don't count, and skip any app the user has chosen to ignore (e.g. iPhone
+/// Mirroring, which holds a silent output stream open).
+func otherAudioSource(ignoring ignored: Set<String> = []) -> String? {
+    for p in outputtingProcesses() {
+        let bid = p.bundleID
+        if bid.isEmpty || bid == "com.apple.Music" { continue }
+        if ignored.contains(bid) { continue }
         return bid
     }
     return nil
@@ -195,17 +247,6 @@ func appName(forBundleID bid: String) -> String {
     return bid
 }
 
-/// Bundle ids of every app (except us) currently outputting audio.
-func outputtingApps() -> [String] {
-    var out: [String] = []
-    for o in audioProcessObjects() where processIsOutputting(o) {
-        let bid = processBundleID(o)
-        if bid.isEmpty || bid == selfBundleID { continue }
-        out.append(bid)
-    }
-    return out
-}
-
 /// Automation (Apple Events) permission state for controlling Music.
 func musicAutomationPermission() -> String {
     guard musicRunning() else { return "Unknown — Music isn't running" }
@@ -240,6 +281,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var statusItem: NSStatusItem!
     private var toggleItem: NSMenuItem!
     private var audioToggleItem: NSMenuItem!
+    private var ignoreMenuItem: NSMenuItem!   // "Ignore audio source ▸" submenu
     private var lockToggleItem: NSMenuItem!
     private var loginItem: NSMenuItem!
     private var callInfoItem: NSMenuItem!
@@ -255,6 +297,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var triggerWasActive = false
     private var pausedByUs = false
     private var pauseReason = ""      // "call", "audio", or "lock" — why we're holding a pause
+    private var pausedAudioApp: String?  // display name of the app that caused an audio-triggered pause
     private var audioActiveSince: Date?  // when the current other-app audio source was first seen (debounce)
     private var audioActiveSource: String?  // bundle id of that source; a change restarts the debounce
     private let audioConfirmSeconds = 3.0 // the SAME source must play this long to pause (rejects notification dings)
@@ -279,6 +322,25 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var pauseOnScreenLock: Bool {
         get { defaults.object(forKey: "pauseOnScreenLockEnabled") as? Bool ?? false }
         set { defaults.set(newValue, forKey: "pauseOnScreenLockEnabled") }
+    }
+
+    // Bundle ids whose audio output should NOT trigger a pause. Some apps hold a
+    // silent output stream open (e.g. iPhone Mirroring), which would otherwise
+    // cause phantom pauses. Seeded once with sensible defaults, then fully
+    // user-managed from the "Ignore audio source" menu.
+    private let defaultIgnoredAudioApps = ["com.apple.ScreenContinuity"] // iPhone Mirroring
+    private var ignoredAudioApps: Set<String> {
+        get {
+            if !defaults.bool(forKey: "ignoredAudioAppsSeeded") {
+                defaults.set(defaultIgnoredAudioApps, forKey: "ignoredAudioApps")
+                defaults.set(true, forKey: "ignoredAudioAppsSeeded")
+            }
+            return Set(defaults.stringArray(forKey: "ignoredAudioApps") ?? [])
+        }
+        set {
+            defaults.set(Array(newValue).sorted(), forKey: "ignoredAudioApps")
+            defaults.set(true, forKey: "ignoredAudioAppsSeeded")
+        }
     }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
@@ -341,6 +403,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         audioToggleItem.target = self
         audioToggleItem.state = pauseOnOtherAudio ? .on : .off
         menu.addItem(audioToggleItem)
+
+        // Submenu to manage which apps' audio is ignored. Populated live via
+        // NSMenuDelegate so it always reflects what's currently playing.
+        ignoreMenuItem = NSMenuItem(title: "Ignore audio source", action: nil, keyEquivalent: "")
+        let ignoreSub = NSMenu(title: "Ignore audio source")
+        ignoreSub.delegate = self
+        ignoreMenuItem.submenu = ignoreSub
+        menu.addItem(ignoreMenuItem)
 
         lockToggleItem = NSMenuItem(title: "Also pause when screen locks",
                                     action: #selector(toggleScreenLock), keyEquivalent: "")
@@ -407,6 +477,24 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             pausedByUs = false
         }
         NSLog("mic-music-pause pause-on-other-audio \(pauseOnOtherAudio ? "enabled" : "disabled")")
+        tick()
+    }
+
+    @objc private func toggleIgnoreAudioApp(_ sender: NSMenuItem) {
+        guard let bid = sender.representedObject as? String, !bid.isEmpty else { return }
+        var set = ignoredAudioApps
+        if set.contains(bid) {
+            set.remove(bid)
+            NSLog("mic-music-pause un-ignored audio app \(bid)")
+        } else {
+            set.insert(bid)
+            NSLog("mic-music-pause ignored audio app \(bid)")
+        }
+        ignoredAudioApps = set
+        // Reset the debounce so a now-ignored source stops counting immediately
+        // (and re-evaluate right away so an unwanted pause lifts at once).
+        audioActiveSince = nil
+        audioActiveSource = nil
         tick()
     }
 
@@ -651,19 +739,32 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
         out += "\n\n"
 
-        let outputting = outputtingApps()
-        let others = outputting.filter { $0 != "com.apple.Music" }
-        out += "Audio output (other apps)\n"
-        if outputting.isEmpty {
+        let procs = outputtingProcesses()
+        let ignored = ignoredAudioApps
+        let triggering = procs.filter { !$0.bundleID.isEmpty && $0.bundleID != "com.apple.Music" && !ignored.contains($0.bundleID) }
+        out += "Audio output (processes making sound)\n"
+        if procs.isEmpty {
             out += "  Nothing is playing audio right now.\n"
         } else {
-            for bid in outputting {
-                let tag = bid == "com.apple.Music" ? "  [Apple Music]" : ""
-                out += "  ♪ \(appName(forBundleID: bid)) (\(bid))\(tag)\n"
+            for p in procs {
+                let bidText = p.bundleID.isEmpty ? "no bundle id" : p.bundleID
+                var tags = ""
+                if p.bundleID == "com.apple.Music" { tags += "  [Apple Music]" }
+                if ignored.contains(p.bundleID) { tags += "  [IGNORED — won't pause]" }
+                if p.bundleID.isEmpty { tags += "  [no bundle id — won't pause]" }
+                out += "  ♪ \(p.name) (\(bidText), pid \(p.pid))\(tags)\n"
             }
         }
-        if !pauseOnOtherAudio && !others.isEmpty {
+        out += "  → Would trigger a pause: \(yn(!triggering.isEmpty))"
+        if let t = triggering.first { out += "  — \(t.name)" }
+        out += "\n"
+        if !pauseOnOtherAudio && !triggering.isEmpty {
             out += "  Note: 'pause for other-app audio' is off, so this won't trigger a pause.\n"
+        }
+        if !ignored.isEmpty {
+            let names = ignored.sorted().map { "\(appName(forBundleID: $0)) (\($0))" }
+            out += "  Ignored apps: \(names.joined(separator: ", "))\n"
+            out += "  (Manage these from the menu ▸ Ignore audio source.)\n"
         }
         out += "\n"
 
@@ -683,7 +784,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             let why: String
             switch pauseReason {
             case "call":  why = "you're in a call"
-            case "audio": why = "another app is playing audio"
+            case "audio": why = "another app is playing audio" + (pausedAudioApp.map { " (\($0))" } ?? "")
             case "lock":  why = "the screen is locked"
             default:      why = pauseReason
             }
@@ -706,7 +807,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let mic = micActive()
         var audioActive = false
         if pauseOnOtherAudio {
-            if let src = otherAudioSource() {
+            if let src = otherAudioSource(ignoring: ignoredAudioApps) {
                 // A new/changed source restarts the confirmation window, so a short
                 // ding from one app can't add its time to unrelated blips from
                 // another — only genuinely sustained playback from one source counts.
@@ -731,12 +832,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             if active && !triggerWasActive {
                 if musicRunning() && musicState() == "playing" {
                     musicPause(); pausedByUs = true; pauseReason = reason
-                    NSLog("\(reason) active -> paused Music")
+                    // Record which app caused an audio-triggered pause so the user
+                    // can see it in Diagnostics.
+                    pausedAudioApp = (reason == "audio")
+                        ? audioActiveSource.map { appName(forBundleID: $0) } : nil
+                    NSLog("\(reason) active\(reason == "audio" ? " (\(audioActiveSource ?? "?"))" : "") -> paused Music")
                 }
             } else if !active && triggerWasActive {
                 if pausedByUs {
                     if musicRunning() { musicPlay() }
                     pausedByUs = false
+                    pausedAudioApp = nil
                     NSLog("trigger cleared -> resumed Music")
                 }
             }
@@ -776,6 +882,62 @@ extension AppDelegate: NSWindowDelegate {
         guard (notification.object as? NSWindow) === diagnosticsWindow else { return }
         diagnosticsTimer?.invalidate()
         diagnosticsTimer = nil
+    }
+}
+
+// MARK: - Ignore-audio submenu (live) -------------------------------------------
+
+extension AppDelegate: NSMenuDelegate {
+    func menuNeedsUpdate(_ menu: NSMenu) {
+        guard menu === ignoreMenuItem?.submenu else { return }
+        menu.removeAllItems()
+
+        let ignored = ignoredAudioApps
+        // Apps currently outputting audio that AREN'T ignored — offer to ignore.
+        let playing = outputtingProcesses().filter {
+            !$0.bundleID.isEmpty && $0.bundleID != "com.apple.Music" && !ignored.contains($0.bundleID)
+        }
+
+        let header = NSMenuItem(title: "Check an app to stop its audio from pausing music", action: nil, keyEquivalent: "")
+        header.isEnabled = false
+        menu.addItem(header)
+        menu.addItem(.separator())
+
+        let nowPlaying = NSMenuItem(title: "Currently playing", action: nil, keyEquivalent: "")
+        nowPlaying.isEnabled = false
+        menu.addItem(nowPlaying)
+        if playing.isEmpty {
+            let none = NSMenuItem(title: "  (nothing else is playing)", action: nil, keyEquivalent: "")
+            none.isEnabled = false
+            menu.addItem(none)
+        } else {
+            var seen = Set<String>()
+            for p in playing where seen.insert(p.bundleID).inserted {
+                let item = NSMenuItem(title: p.name, action: #selector(toggleIgnoreAudioApp(_:)), keyEquivalent: "")
+                item.target = self
+                item.representedObject = p.bundleID
+                item.state = .off
+                menu.addItem(item)
+            }
+        }
+
+        menu.addItem(.separator())
+        let ignoredHeader = NSMenuItem(title: "Ignored (won't pause music)", action: nil, keyEquivalent: "")
+        ignoredHeader.isEnabled = false
+        menu.addItem(ignoredHeader)
+        if ignored.isEmpty {
+            let none = NSMenuItem(title: "  (none)", action: nil, keyEquivalent: "")
+            none.isEnabled = false
+            menu.addItem(none)
+        } else {
+            for bid in ignored.sorted() {
+                let item = NSMenuItem(title: appName(forBundleID: bid), action: #selector(toggleIgnoreAudioApp(_:)), keyEquivalent: "")
+                item.target = self
+                item.representedObject = bid
+                item.state = .on   // checked = ignored; clicking un-ignores
+                menu.addItem(item)
+            }
+        }
     }
 }
 

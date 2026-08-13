@@ -20,6 +20,12 @@ icon). Click it to:
 - **Also pause for audio from other apps** — optional (off by default). When on,
   Music also pauses if another app (e.g. a video in your browser) starts playing
   audio, and resumes when it stops.
+- **Ignore audio source ▸** — submenu to exclude specific apps from triggering an
+  "other-app audio" pause. Some apps (e.g. **iPhone Mirroring**) hold a silent
+  audio stream open, which would otherwise cause phantom pauses; iPhone Mirroring
+  (`com.apple.ScreenContinuity`) is ignored by default. The submenu lists apps
+  **Currently playing** (click one to ignore it) and **Ignored** apps (checked;
+  click to un-ignore). It updates live each time you open it.
 - **Also pause when screen locks** — optional (off by default). When on, Music
   pauses the moment your screen locks and resumes when you unlock.
 - **Start at login** — optional. Launches the app automatically when you log in
