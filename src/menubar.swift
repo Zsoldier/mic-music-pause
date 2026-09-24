@@ -44,6 +44,43 @@ func micActive() -> Bool {
     audioDevices().contains { hasInput($0) && isRunning($0) }
 }
 
+private func defaultOutputDevice() -> AudioDeviceID? {
+    var addr = prop(kAudioHardwarePropertyDefaultOutputDevice)
+    var dev = AudioDeviceID(0)
+    var size = UInt32(MemoryLayout<AudioDeviceID>.size)
+    guard AudioObjectGetPropertyData(AudioObjectID(kAudioObjectSystemObject), &addr, 0, nil, &size, &dev) == noErr,
+          dev != 0 else { return nil }
+    return dev
+}
+
+private func isExternalOutputTransport(_ t: UInt32) -> Bool {
+    switch t {
+    case kAudioDeviceTransportTypeUSB,
+         kAudioDeviceTransportTypeBluetooth,
+         kAudioDeviceTransportTypeBluetoothLE,
+         kAudioDeviceTransportTypeHDMI,
+         kAudioDeviceTransportTypeDisplayPort,
+         kAudioDeviceTransportTypeThunderbolt,
+         kAudioDeviceTransportTypeFireWire,
+         kAudioDeviceTransportTypePCI,
+         kAudioDeviceTransportTypeAirPlay:
+        return true
+    default:
+        return false
+    }
+}
+
+/// True when the current default output route is an external transport
+/// (USB/Bluetooth/HDMI/AirPlay/etc.), not built-in speakers.
+func externalOutputConnected() -> Bool {
+    guard let dev = defaultOutputDevice() else { return false }
+    var addr = prop(kAudioDevicePropertyTransportType)
+    var t = UInt32(0)
+    var sz = UInt32(MemoryLayout<UInt32>.size)
+    guard AudioObjectGetPropertyData(dev, &addr, 0, nil, &sz, &t) == noErr else { return false }
+    return isExternalOutputTransport(t)
+}
+
 // MARK: - Apple Music control ---------------------------------------------------
 //
 // We talk to Music with Apple Events sent *in-process* (NSAppleScript) so macOS
@@ -283,6 +320,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var audioToggleItem: NSMenuItem!
     private var ignoreMenuItem: NSMenuItem!   // "Ignore audio source ▸" submenu
     private var lockToggleItem: NSMenuItem!
+    private var externalResumeToggleItem: NSMenuItem!
     private var loginItem: NSMenuItem!
     private var callInfoItem: NSMenuItem!
     private var musicInfoItem: NSMenuItem!
@@ -297,6 +335,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var triggerWasActive = false
     private var pausedByUs = false
     private var pauseReason = ""      // "call", "audio", or "lock" — why we're holding a pause
+    private var resumeHeldForExternalOutput = false // trigger cleared, but resume is gated by output route
     private var pausedAudioApp: String?  // display name of the app that caused an audio-triggered pause
     private var audioActiveSince: Date?  // when the current other-app audio source was first seen (debounce)
     private var audioActiveSource: String?  // bundle id of that source; a change restarts the debounce
@@ -322,6 +361,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var pauseOnScreenLock: Bool {
         get { defaults.object(forKey: "pauseOnScreenLockEnabled") as? Bool ?? false }
         set { defaults.set(newValue, forKey: "pauseOnScreenLockEnabled") }
+    }
+    // Optional: auto-resume only when an external output device is the current
+    // default route (off by default).
+    private var resumeOnlyOnExternalOutput: Bool {
+        get { defaults.object(forKey: "resumeOnlyOnExternalOutputEnabled") as? Bool ?? false }
+        set { defaults.set(newValue, forKey: "resumeOnlyOnExternalOutputEnabled") }
     }
 
     // Bundle ids whose audio output should NOT trigger a pause. Some apps hold a
@@ -418,6 +463,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         lockToggleItem.state = pauseOnScreenLock ? .on : .off
         menu.addItem(lockToggleItem)
 
+        externalResumeToggleItem = NSMenuItem(title: "Only resume on external speaker",
+                              action: #selector(toggleExternalResumeGate), keyEquivalent: "")
+        externalResumeToggleItem.target = self
+        externalResumeToggleItem.state = resumeOnlyOnExternalOutput ? .on : .off
+        menu.addItem(externalResumeToggleItem)
+
         if #available(macOS 13.0, *) {
             loginItem = NSMenuItem(title: "Start at login",
                                    action: #selector(toggleLoginItem), keyEquivalent: "")
@@ -461,6 +512,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         if !enabled && pausedByUs {
             if musicRunning() { musicPlay() }
             pausedByUs = false
+            resumeHeldForExternalOutput = false
         }
         NSLog("mic-music-pause auto-pause \(enabled ? "enabled" : "disabled")")
         tick()
@@ -475,6 +527,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         if !pauseOnOtherAudio && pausedByUs && pauseReason == "audio" && !micActive() {
             if musicRunning() { musicPlay() }
             pausedByUs = false
+            resumeHeldForExternalOutput = false
         }
         NSLog("mic-music-pause pause-on-other-audio \(pauseOnOtherAudio ? "enabled" : "disabled")")
         tick()
@@ -505,8 +558,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         if !pauseOnScreenLock && pausedByUs && pauseReason == "lock" && !micActive() {
             if musicRunning() { musicPlay() }
             pausedByUs = false
+            resumeHeldForExternalOutput = false
         }
         NSLog("mic-music-pause pause-on-screen-lock \(pauseOnScreenLock ? "enabled" : "disabled")")
+        tick()
+    }
+
+    @objc private func toggleExternalResumeGate() {
+        resumeOnlyOnExternalOutput.toggle()
+        externalResumeToggleItem.state = resumeOnlyOnExternalOutput ? .on : .off
+        NSLog("mic-music-pause resume-only-on-external-output \(resumeOnlyOnExternalOutput ? "enabled" : "disabled")")
         tick()
     }
 
@@ -559,6 +620,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func applyUpdateState(latest: String) {
+        // Local/dev builds (for example 0.0.0-local) are intentionally outside
+        // release version ordering, so skip update nags for those builds.
+        guard !isDevelopmentBuild(appVersion) else {
+            updateItem.isHidden = true
+            return
+        }
         guard isNewer(latest, than: appVersion) else {
             updateItem.isHidden = true
             return
@@ -581,6 +648,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             let y = i < b.count ? b[i] : 0
             if x != y { return x > y }
         }
+        return false
+    }
+
+    /// True for local/dev/non-release builds that should not show release update
+    /// nags because semantic version comparison is not meaningful for them.
+    private func isDevelopmentBuild(_ version: String) -> Bool {
+        let v = version.lowercased()
+        if v.hasSuffix("-local") || v.contains("local") { return true }
+        if v.contains("dev") || v.contains("snapshot") || v.contains("head") { return true }
         return false
     }
 
@@ -720,6 +796,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         out += "  Auto-pause on calls:            \(onoff(enabled))\n"
         out += "  Also pause for other-app audio: \(onoff(pauseOnOtherAudio))\n"
         out += "  Also pause when screen locks:   \(onoff(pauseOnScreenLock))\n"
+        out += "  Only resume on external output: \(onoff(resumeOnlyOnExternalOutput))\n"
+        out += "\n"
+
+        out += "Audio route\n"
+        if let dev = defaultOutputDevice() {
+            let name = audioObjectString(dev, kAudioObjectPropertyName)
+            let transport = deviceTransport(dev)
+            out += "  Default output: \(name.isEmpty ? "Unnamed device" : name) (\(transport))\n"
+            out += "  External route active: \(yn(externalOutputConnected()))\n"
+        } else {
+            out += "  Default output: unknown\n"
+            out += "  External route active: no\n"
+        }
         out += "\n"
 
         let inputs = inputDeviceInfos()
@@ -781,14 +870,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         out += "Current status\n"
         if pausedByUs {
-            let why: String
-            switch pauseReason {
-            case "call":  why = "you're in a call"
-            case "audio": why = "another app is playing audio" + (pausedAudioApp.map { " (\($0))" } ?? "")
-            case "lock":  why = "the screen is locked"
-            default:      why = pauseReason
+            if resumeHeldForExternalOutput {
+                out += "  Holding music paused: yes — waiting for external output route before resuming.\n"
+            } else {
+                let why: String
+                switch pauseReason {
+                case "call":  why = "you're in a call"
+                case "audio": why = "another app is playing audio" + (pausedAudioApp.map { " (\($0))" } ?? "")
+                case "lock":  why = "the screen is locked"
+                default:      why = pauseReason
+                }
+                out += "  Holding music paused: yes — because \(why).\n"
             }
-            out += "  Holding music paused: yes — because \(why).\n"
         } else {
             out += "  Holding music paused: no.\n"
         }
@@ -800,6 +893,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func tick() {
+        let canAutoResume = !resumeOnlyOnExternalOutput || externalOutputConnected()
+
         // Mic (a call) always triggers. Other-app audio triggers only when enabled,
         // and the SAME source must keep playing for `audioConfirmSeconds` so brief
         // notification dings (which don't sustain that long) are ignored. Resume,
@@ -832,6 +927,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             if active && !triggerWasActive {
                 if musicRunning() && musicState() == "playing" {
                     musicPause(); pausedByUs = true; pauseReason = reason
+                    resumeHeldForExternalOutput = false
                     // Record which app caused an audio-triggered pause so the user
                     // can see it in Diagnostics.
                     pausedAudioApp = (reason == "audio")
@@ -840,10 +936,30 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 }
             } else if !active && triggerWasActive {
                 if pausedByUs {
-                    if musicRunning() { musicPlay() }
-                    pausedByUs = false
-                    pausedAudioApp = nil
-                    NSLog("trigger cleared -> resumed Music")
+                    if canAutoResume {
+                        if musicRunning() { musicPlay() }
+                        pausedByUs = false
+                        resumeHeldForExternalOutput = false
+                        pausedAudioApp = nil
+                        NSLog("trigger cleared -> resumed Music")
+                    } else {
+                        resumeHeldForExternalOutput = true
+                        NSLog("trigger cleared but external output not active -> keeping Music paused")
+                    }
+                }
+            } else if !active && pausedByUs && canAutoResume {
+                // If a trigger cleared earlier while the external output route was
+                // unavailable, resume as soon as it becomes available again.
+                if musicRunning() { musicPlay() }
+                pausedByUs = false
+                resumeHeldForExternalOutput = false
+                pausedAudioApp = nil
+                NSLog("external output active -> resumed Music")
+            } else if !active && pausedByUs && !canAutoResume {
+                resumeHeldForExternalOutput = true
+                // Keep logging sparse but explicit while we're intentionally held.
+                if triggerWasActive {
+                    NSLog("waiting to resume until external output route is active")
                 }
             }
         }

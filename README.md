@@ -29,6 +29,10 @@ icon). Click it to:
   click to un-ignore). It updates live each time you open it.
 - **Also pause when screen locks** — optional (off by default). When on, Music
   pauses the moment your screen locks and resumes when you unlock.
+- **Only resume on external speaker** — optional (off by default). When on,
+  automatic resume happens only if your current default output route is external
+  (for example USB, Bluetooth, HDMI, or AirPlay). If a call ends while output is
+  built-in, Music stays paused until an external route is active.
 - **Start at login** — optional. Launches the app automatically when you log in
   (uses macOS Login Items).
 - **Update available: vX.Y.Z** — appears only when a newer release exists on the
@@ -142,6 +146,10 @@ mic-music-pause help
 - The optional "pause when screen locks" toggle listens for the system
   `com.apple.screenIsLocked` / `com.apple.screenIsUnlocked` notifications, so it
   pauses/resumes immediately on lock/unlock rather than waiting for the next poll.
+- The optional "only resume on external speaker" toggle checks the current
+  default output device transport via CoreAudio. Auto-resume is allowed on
+  external routes (USB/Bluetooth/HDMI/AirPlay/etc.) and held on built-in output
+  until an external route is active.
 - The menu bar app checks the GitHub Releases API (unauthenticated, once at launch
   then every 6 hours) and, if a newer version is published, shows an "Update
   available" item that runs `brew upgrade` in Terminal. `brew` remains the single
