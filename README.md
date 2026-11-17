@@ -20,7 +20,8 @@ icon). Click it to:
 - **Auto-pause music on calls** — check/uncheck to turn the behavior on or off.
 - **Also pause for audio from other apps** — optional (off by default). When on,
   Music also pauses if another app (e.g. a video in your browser) starts playing
-  audio, and resumes when it stops.
+  audio, and resumes after it stops. A short quiet-period check keeps notifications
+  and brief audio interruptions from resuming Music over a video.
 - **Ignore audio source ▸** — submenu to exclude specific apps from triggering an
   "other-app audio" pause. Some apps (e.g. **iPhone Mirroring**) hold a silent
   audio stream open, which would otherwise cause phantom pauses; iPhone Mirroring
@@ -35,8 +36,13 @@ icon). Click it to:
   built-in, Music stays paused until an external route is active.
 - **Start at login** — optional. Launches the app automatically when you log in
   (uses macOS Login Items).
-- **Update available: vX.Y.Z** — appears only when a newer release exists on the
-  tap. Click it to run `brew upgrade` in Terminal.
+- **Check for Updates…** — checks the repository's latest stable GitHub release
+  now. The app also checks automatically at launch and every 6 hours.
+- **Update available: vX.Y.Z** — click and confirm to install the update and
+  restart. Direct-download installs fetch the signed DMG and verify that the
+  app is trusted by macOS and matches the installed app's signing identity before
+  replacing it. Homebrew installs run `brew update` and `brew upgrade` in Terminal.
+  Nothing is installed without confirmation.
 - **Diagnostics…** — opens a live troubleshooter window that shows all your input
   devices (naming each and its connection type, e.g. "Blue Yeti (USB)") and which
   are **ACTIVE (in use)**, which apps are currently playing audio, screen-lock
@@ -68,8 +74,10 @@ Control Center, so the menu bar is the native equivalent.
 4. Click the menu bar icon and enable **Start at login**.
 
 The app is Developer ID–signed and notarized by Apple, so it opens without any
-Gatekeeper warnings. Updates: the menu shows "Update available" when a newer
-release exists and opens the Releases page so you can download the new DMG.
+Gatekeeper warnings. Use **Check for Updates…** or click **Update available** in
+the menu to install a newer release and restart. The app must be in a writable
+folder, not running from the read-only DMG. Local/development builds do not offer
+release updates.
 
 ## Install (Homebrew)
 
@@ -141,8 +149,12 @@ mic-music-pause help
 - The optional "pause for audio from other apps" toggle uses CoreAudio per-process
   audio objects (`kAudioHardwarePropertyProcessObjectList` +
   `kAudioProcessPropertyIsRunningOutput`, macOS 14.2+) to see which apps are playing
-  sound, ignoring Music itself. A short debounce keeps brief notification chimes from
-  triggering a pause.
+  sound, ignoring Music itself. Each source is tracked independently and must stay
+  active for 3 seconds to trigger a pause, so brief notification chimes cannot
+  displace an ongoing video. Once all confirmed sources stop, an established
+  pause is held for another 3 seconds (typically 4 seconds after detecting the
+  stop with the 2-second polling interval), tolerating brief output interruptions
+  before resuming.
 - The optional "pause when screen locks" toggle listens for the system
   `com.apple.screenIsLocked` / `com.apple.screenIsUnlocked` notifications, so it
   pauses/resumes immediately on lock/unlock rather than waiting for the next poll.
@@ -151,9 +163,13 @@ mic-music-pause help
   external routes (USB/Bluetooth/HDMI/AirPlay/etc.) and held on built-in output
   until an external route is active.
 - The menu bar app checks the GitHub Releases API (unauthenticated, once at launch
-  then every 6 hours) and, if a newer version is published, shows an "Update
-  available" item that runs `brew upgrade` in Terminal. `brew` remains the single
-  source of truth for updates; the app only surfaces the nudge.
+  then every 6 hours, or on demand). A newer stable release with the expected DMG
+  shows an "Update available" item. Installation always requires confirmation.
+  Direct installs verify the DMG with Gatekeeper, check the app's code signature
+  against the running app's designated signing requirement, and stage the
+  replacement beside the installed app before relaunching. Homebrew-managed apps
+  are updated only through Homebrew. Check/install errors are reported explicitly;
+  background check failures are logged without interrupting playback.
 - `bin/mic-music-pause` is a CLI for manual/headless use (`status`, `watch`, etc.).
 
 ## Notes / caveats
@@ -165,6 +181,15 @@ mic-music-pause help
   system sounds and command-line players are ignored.
 
 ## Releasing (maintainers)
+
+Run the audio debounce and update regression tests without launching the menu bar app:
+
+```sh
+test_binary="$(mktemp /tmp/mic-music-pause-tests.XXXXXX)"
+xcrun swiftc -parse-as-library -D APP_TESTS src/menubar.swift tests/main.swift -o "$test_binary" &&
+  "$test_binary"
+rm -f "$test_binary"
+```
 
 Cutting a release automatically updates the formula in
 [`Zsoldier/homebrew-tap`](https://github.com/Zsoldier/homebrew-tap):

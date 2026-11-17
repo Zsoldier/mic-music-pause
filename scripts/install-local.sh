@@ -17,7 +17,7 @@ echo "Building menu bar app bundle..."
 APP="$LIBEXEC_DIR/mic-music-pause.app"
 rm -rf "$APP"
 mkdir -p "$APP/Contents/MacOS"
-xcrun swiftc -O -o "$APP/Contents/MacOS/mic-music-pause-menubar" "$REPO_DIR/src/menubar.swift"
+xcrun swiftc -parse-as-library -O -o "$APP/Contents/MacOS/mic-music-pause-menubar" "$REPO_DIR/src/menubar.swift"
 cat > "$APP/Contents/Info.plist" <<'PLIST'
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">

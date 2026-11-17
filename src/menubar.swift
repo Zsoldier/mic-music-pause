@@ -1,6 +1,7 @@
 import Cocoa
 import CoreAudio
 import ServiceManagement
+import Security
 
 // MARK: - Microphone detection (CoreAudio) --------------------------------------
 
@@ -203,19 +204,57 @@ func outputtingProcesses() -> [AudioOutputProcess] {
     return out
 }
 
-/// The bundle id of some *other* app (not Music, not us, not ignored) currently
-/// playing audio, or nil if nothing qualifying is. We require a non-empty bundle
+/// The bundle ids of *other* apps (not Music, not us, not ignored) currently
+/// playing audio. We require a non-empty bundle
 /// id so transient system sounds and CLI helpers (e.g. afplay/notifications)
 /// don't count, and skip any app the user has chosen to ignore (e.g. iPhone
 /// Mirroring, which holds a silent output stream open).
-func otherAudioSource(ignoring ignored: Set<String> = []) -> String? {
+func otherAudioSources(ignoring ignored: Set<String> = []) -> Set<String> {
+    var sources = Set<String>()
     for p in outputtingProcesses() {
         let bid = p.bundleID
         if bid.isEmpty || bid == "com.apple.Music" { continue }
         if ignored.contains(bid) { continue }
-        return bid
+        sources.insert(bid)
     }
-    return nil
+    return sources
+}
+
+struct AudioActivityTracker {
+    private var activeSince: [String: TimeInterval] = [:]
+    private var inactiveSince: TimeInterval?
+    private(set) var source: String?
+    private let confirmSeconds = 3.0
+    private let releaseSeconds = 3.0
+
+    mutating func update(sources: Set<String>, now: TimeInterval) {
+        activeSince = activeSince.filter { sources.contains($0.key) }
+        for source in sources where activeSince[source] == nil {
+            activeSince[source] = now
+        }
+
+        if let source = source, sources.contains(source) {
+            inactiveSince = nil
+            return
+        }
+        if let confirmed = sources.sorted().first(where: {
+            now - activeSince[$0, default: now] >= confirmSeconds
+        }) {
+            source = confirmed
+            inactiveSince = nil
+            return
+        }
+
+        // A notification may briefly interrupt a video's output stream. Keep an
+        // established pause through that gap while returning audio is confirmed.
+        if source != nil {
+            if inactiveSince == nil { inactiveSince = now }
+            if now - (inactiveSince ?? now) >= releaseSeconds {
+                source = nil
+                inactiveSince = nil
+            }
+        }
+    }
 }
 
 // MARK: - Diagnostics helpers ---------------------------------------------------
@@ -312,6 +351,123 @@ func installSource() -> String {
     return "Other — \(resolved)"
 }
 
+// MARK: - Release updates ------------------------------------------------------
+
+struct AppRelease: Decodable {
+    struct Asset: Decodable {
+        let name: String
+        let browser_download_url: URL
+    }
+
+    let tag_name: String
+    let draft: Bool
+    let prerelease: Bool
+    let assets: [Asset]
+
+    var version: String { tag_name.hasPrefix("v") ? String(tag_name.dropFirst()) : tag_name }
+
+    var diskImageURL: URL? {
+        guard !draft, !prerelease,
+              version.range(of: #"^[0-9]+\.[0-9]+\.[0-9]+$"#, options: .regularExpression) != nil
+        else { return nil }
+        let name = "mic-music-pause-\(version).dmg"
+        return assets.first {
+            $0.name == name &&
+            $0.browser_download_url.absoluteString ==
+                "https://github.com/Zsoldier/mic-music-pause/releases/download/\(tag_name)/\(name)"
+        }?.browser_download_url
+    }
+}
+
+private struct UpdateFailure: LocalizedError {
+    let message: String
+    var errorDescription: String? { message }
+}
+
+enum AppUpdateInstaller {
+    static func run(_ executable: String, _ arguments: [String]) throws {
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: executable)
+        process.arguments = arguments
+        let output = Pipe()
+        process.standardOutput = output
+        process.standardError = output
+        try process.run()
+        let data = output.fileHandleForReading.readDataToEndOfFile()
+        process.waitUntilExit()
+        guard process.terminationStatus == 0 else {
+            let detail = String(decoding: data, as: UTF8.self)
+            throw UpdateFailure(message: "\(URL(fileURLWithPath: executable).lastPathComponent) failed: \(detail)")
+        }
+    }
+
+    static func install(diskImage: URL, at destination: URL, version: String) throws {
+        let fm = FileManager.default
+        let parent = destination.deletingLastPathComponent()
+        guard destination.pathExtension == "app",
+              fm.isWritableFile(atPath: parent.path),
+              fm.isWritableFile(atPath: destination.path) else {
+            throw UpdateFailure(message: "The app cannot be replaced in its current location. Move it to a writable Applications folder, then try again.")
+        }
+
+        let mount = fm.temporaryDirectory.appendingPathComponent("mic-music-pause-mount-\(UUID().uuidString)")
+        try fm.createDirectory(at: mount, withIntermediateDirectories: false)
+        var mounted = false
+        defer {
+            do {
+                if mounted { try run("/usr/bin/hdiutil", ["detach", mount.path]) }
+                try fm.removeItem(at: mount)
+            } catch {
+                NSLog("Update disk image cleanup failed at \(mount.path): \(error.localizedDescription)")
+            }
+        }
+        try run("/usr/sbin/spctl", ["--assess", "--type", "open", "--context",
+                                   "context:primary-signature", diskImage.path])
+        try run("/usr/bin/hdiutil", ["attach", "-readonly", "-nobrowse", "-noautoopen",
+                                    "-mountpoint", mount.path, diskImage.path])
+        mounted = true
+
+        let app = mount.appendingPathComponent("mic-music-pause.app")
+        try validate(app: app, version: version)
+
+        let staged = parent.appendingPathComponent(".mic-music-pause-update-\(UUID().uuidString).app")
+        defer {
+            if fm.fileExists(atPath: staged.path) {
+                do { try fm.removeItem(at: staged) }
+                catch { NSLog("Staged update cleanup failed: \(error.localizedDescription)") }
+            }
+        }
+        try fm.copyItem(at: app, to: staged)
+        _ = try fm.replaceItemAt(destination, withItemAt: staged)
+    }
+
+    static func validate(app: URL, version: String) throws {
+        var ownCode: SecCode?
+        var ownStaticCode: SecStaticCode?
+        var requirement: SecRequirement?
+        var downloadedCode: SecStaticCode?
+        guard SecCodeCopySelf([], &ownCode) == errSecSuccess, let ownCode,
+              SecCodeCopyStaticCode(ownCode, [], &ownStaticCode) == errSecSuccess,
+              let ownStaticCode,
+              SecCodeCopyDesignatedRequirement(ownStaticCode, [], &requirement) == errSecSuccess,
+              let requirement,
+              SecStaticCodeCreateWithPath(app as CFURL, [], &downloadedCode) == errSecSuccess,
+              let downloadedCode,
+              SecStaticCodeCheckValidity(downloadedCode,
+                                        SecCSFlags(rawValue: kSecCSStrictValidate | kSecCSCheckAllArchitectures),
+                                        requirement) == errSecSuccess else {
+            throw UpdateFailure(message: "The downloaded app does not have a valid signature matching this app. No update was installed.")
+        }
+        try run("/usr/sbin/spctl", ["--assess", "--type", "execute", app.path])
+        guard let bundle = Bundle(url: app),
+              bundle.bundleIdentifier == "com.zsoldier.mic-music-pause",
+              bundle.infoDictionary?["CFBundleShortVersionString"] as? String == version else {
+            throw UpdateFailure(message: "The downloaded app does not match the requested release.")
+        }
+
+    }
+}
+
 // MARK: - App delegate / menu bar UI --------------------------------------------
 
 final class AppDelegate: NSObject, NSApplicationDelegate {
@@ -325,6 +481,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var callInfoItem: NSMenuItem!
     private var musicInfoItem: NSMenuItem!
     private var updateItem: NSMenuItem!
+    private var checkUpdateItem: NSMenuItem!
     private var timer: Timer?
     private var updateTimer: Timer?
 
@@ -337,14 +494,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var pauseReason = ""      // "call", "audio", or "lock" — why we're holding a pause
     private var resumeHeldForExternalOutput = false // trigger cleared, but resume is gated by output route
     private var pausedAudioApp: String?  // display name of the app that caused an audio-triggered pause
-    private var audioActiveSince: Date?  // when the current other-app audio source was first seen (debounce)
-    private var audioActiveSource: String?  // bundle id of that source; a change restarts the debounce
-    private let audioConfirmSeconds = 3.0 // the SAME source must play this long to pause (rejects notification dings)
+    private var audioActivity = AudioActivityTracker()
     private var screenLocked = false     // updated by screen lock/unlock notifications
 
     // This build's version (from Info.plist) and the latest seen on GitHub.
     private let appVersion = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "0"
-    private var latestVersion: String?
+    private var latestRelease: AppRelease?
+    private var checkingForUpdate = false
+    private var installingUpdate = false
     private let releasesAPI = "https://api.github.com/repos/Zsoldier/mic-music-pause/releases/latest"
 
     private let defaults = UserDefaults.standard
@@ -395,6 +552,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         for other in NSRunningApplication.runningApplications(withBundleIdentifier: selfBundleID)
             where other.processIdentifier != mypid {
             other.terminate()
+        }
+
+        let arguments = ProcessInfo.processInfo.arguments
+        if let index = arguments.firstIndex(of: "--resume-owned-pause"),
+           index + 1 < arguments.count,
+           musicRunning(), musicState() == "paused" {
+            pausedByUs = true
+            pauseReason = arguments[index + 1]
         }
 
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
@@ -492,6 +657,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         updateItem.isHidden = true   // shown only when a newer release is found
         menu.addItem(updateItem)
 
+        checkUpdateItem = NSMenuItem(title: "Check for Updates…",
+                                    action: #selector(manuallyCheckForUpdate), keyEquivalent: "")
+        checkUpdateItem.target = self
+        menu.addItem(checkUpdateItem)
+
         let diagnostics = NSMenuItem(title: "Diagnostics…",
                                      action: #selector(showDiagnostics), keyEquivalent: "")
         diagnostics.target = self
@@ -521,8 +691,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     @objc private func toggleOtherAudio() {
         pauseOnOtherAudio.toggle()
         audioToggleItem.state = pauseOnOtherAudio ? .on : .off
-        audioActiveSince = nil
-        audioActiveSource = nil
+        audioActivity = AudioActivityTracker()
         // If turning off an audio-triggered pause (and not in a call), resume now.
         if !pauseOnOtherAudio && pausedByUs && pauseReason == "audio" && !micActive() {
             if musicRunning() { musicPlay() }
@@ -546,8 +715,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         ignoredAudioApps = set
         // Reset the debounce so a now-ignored source stops counting immediately
         // (and re-evaluate right away so an unwanted pause lifts at once).
-        audioActiveSince = nil
-        audioActiveSource = nil
+        audioActivity = AudioActivityTracker()
         tick()
     }
 
@@ -605,35 +773,85 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     /// Fetch the latest release tag from GitHub and, if it's newer than this
     /// build, reveal the "Update available" menu item. Network only; no auth.
-    private func checkForUpdate() {
-        guard let url = URL(string: releasesAPI) else { return }
+    @objc private func manuallyCheckForUpdate() { checkForUpdate(manual: true) }
+
+    private func showUpdateMessage(_ title: String, detail: String) {
+        let alert = NSAlert()
+        alert.messageText = title
+        alert.informativeText = detail
+        NSApp.activate(ignoringOtherApps: true)
+        alert.runModal()
+    }
+
+    private func checkForUpdate(manual: Bool = false) {
+        guard !checkingForUpdate, !installingUpdate,
+              let url = URL(string: releasesAPI) else { return }
+        checkingForUpdate = true
+        checkUpdateItem.title = "Checking for Updates…"
+        checkUpdateItem.isEnabled = false
         var req = URLRequest(url: url, timeoutInterval: 15)
         req.setValue("mic-music-pause", forHTTPHeaderField: "User-Agent")
         req.setValue("application/vnd.github+json", forHTTPHeaderField: "Accept")
-        URLSession.shared.dataTask(with: req) { [weak self] data, _, _ in
-            guard let self, let data,
-                  let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-                  let tag = obj["tag_name"] as? String else { return }
-            let latest = tag.hasPrefix("v") ? String(tag.dropFirst()) : tag
-            DispatchQueue.main.async { self.applyUpdateState(latest: latest) }
+        URLSession.shared.dataTask(with: req) { [weak self] data, response, error in
+            let result: Result<AppRelease, Error>
+            do {
+                if let error { throw error }
+                guard let response = response as? HTTPURLResponse,
+                      response.statusCode == 200, let data else {
+                    let status = (response as? HTTPURLResponse)?.statusCode ?? 0
+                    throw UpdateFailure(message: "GitHub returned HTTP \(status). Please try again later.")
+                }
+                let release = try JSONDecoder().decode(AppRelease.self, from: data)
+                guard release.diskImageURL != nil else {
+                    throw UpdateFailure(message: "The latest release does not have a supported stable macOS download yet.")
+                }
+                result = .success(release)
+            } catch {
+                result = .failure(error)
+            }
+            DispatchQueue.main.async {
+                guard let self else { return }
+                self.checkingForUpdate = false
+                self.checkUpdateItem.title = "Check for Updates…"
+                self.checkUpdateItem.isEnabled = !self.installingUpdate
+                switch result {
+                case .success(let release):
+                    self.applyUpdateState(release: release)
+                    if manual {
+                        if self.isDevelopmentBuild(self.appVersion) {
+                            self.showUpdateMessage("Development build", detail: "Release updates are disabled for local and development builds.")
+                        } else if self.latestRelease != nil {
+                            self.openUpdate()
+                        } else {
+                            self.showUpdateMessage("You’re up to date", detail: "mic-music-pause \(self.appVersion) is the latest version.")
+                        }
+                    }
+                case .failure(let error):
+                    NSLog("Update check failed: \(error.localizedDescription)")
+                    if manual {
+                        self.showUpdateMessage("Couldn’t check for updates", detail: error.localizedDescription)
+                    }
+                }
+            }
         }.resume()
     }
 
-    private func applyUpdateState(latest: String) {
+    private func applyUpdateState(release: AppRelease) {
+        latestRelease = nil
         // Local/dev builds (for example 0.0.0-local) are intentionally outside
         // release version ordering, so skip update nags for those builds.
         guard !isDevelopmentBuild(appVersion) else {
             updateItem.isHidden = true
             return
         }
-        guard isNewer(latest, than: appVersion) else {
+        guard isNewer(release.version, than: appVersion) else {
             updateItem.isHidden = true
             return
         }
-        latestVersion = latest
-        updateItem.title = "Update available: v\(latest) — click to update"
+        latestRelease = release
+        updateItem.title = "Update available: v\(release.version) — click to update"
         updateItem.isHidden = false
-        NSLog("mic-music-pause update available: \(appVersion) -> \(latest)")
+        NSLog("mic-music-pause update available: \(appVersion) -> \(release.version)")
     }
 
     /// Compare dotted version strings numerically (e.g. "0.10.0" > "0.9.0").
@@ -660,11 +878,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         return false
     }
 
-    /// Run `brew upgrade` in Terminal via a throwaway .command file. Opening the
-    /// file launches Terminal independently, so it survives brew restarting our
-    /// service, and it needs no extra automation permission.
+    /// Direct installs replace the verified app; Homebrew remains responsible
+    /// for managing its own installation.
     @objc private func openUpdate() {
-        let releasesPage = URL(string: "https://github.com/Zsoldier/mic-music-pause/releases/latest")!
+        guard !installingUpdate, let release = latestRelease else { return }
+        let alert = NSAlert()
+        alert.messageText = "Install mic-music-pause \(release.version)?"
+        alert.informativeText = "The app will update and restart. Homebrew installations are updated through Homebrew in Terminal."
+        alert.addButton(withTitle: "Update")
+        alert.addButton(withTitle: "Cancel")
+        NSApp.activate(ignoringOtherApps: true)
+        guard alert.runModal() == .alertFirstButtonReturn else { return }
 
         // Resolve symlinks so a launch via Homebrew's opt/ symlink still reveals
         // the real Cellar path. Only drive `brew upgrade` for a Homebrew install;
@@ -673,35 +897,104 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             .resolvingSymlinksInPath().path
         let brewPath = ["/opt/homebrew/bin/brew", "/usr/local/bin/brew"]
             .first { FileManager.default.fileExists(atPath: $0) }
-        let isHomebrew = resolvedPath.contains("/Cellar/mic-music-pause/") && brewPath != nil
+        let isHomebrew = resolvedPath.contains("/Cellar/mic-music-pause/")
 
-        guard isHomebrew, let brew = brewPath else {
-            // Direct download: send the user to the Releases page to grab the
-            // latest DMG.
-            NSWorkspace.shared.open(releasesPage)
+        guard isHomebrew else {
+            installDirectUpdate(release)
+            return
+        }
+        guard let brew = brewPath else {
+            showUpdateMessage("Couldn’t start update", detail: "Homebrew was not found. Restore Homebrew and run brew upgrade zsoldier/tap/mic-music-pause.")
             return
         }
 
         let script = """
         #!/bin/bash
+        set -euo pipefail
+        trap 'rm -f -- "$0"' EXIT
         echo "Upgrading mic-music-pause…"
+        "\(brew)" update
         "\(brew)" upgrade zsoldier/tap/mic-music-pause
         echo
         echo "Relaunching the app…"
         APP="$("\(brew)" --prefix mic-music-pause)/libexec/mic-music-pause.app"
-        [ -d "$APP" ] && open -n "$APP"
+        if [ ! -d "$APP" ]; then
+          echo "The upgraded app was not found at $APP" >&2
+          exit 1
+        fi
+        open -n "$APP"
         echo "Done. You can close this window."
         """
-        let path = NSTemporaryDirectory() + "mic-music-pause-upgrade.command"
+        let path = NSTemporaryDirectory() + "mic-music-pause-upgrade-\(UUID().uuidString).command"
         do {
             try script.write(toFile: path, atomically: true, encoding: .utf8)
             try FileManager.default.setAttributes([.posixPermissions: 0o755],
                                                   ofItemAtPath: path)
-            NSWorkspace.shared.open(URL(fileURLWithPath: path))
+            guard NSWorkspace.shared.open(URL(fileURLWithPath: path)) else {
+                throw UpdateFailure(message: "Terminal could not open the Homebrew update script.")
+            }
         } catch {
-            // Fallback: open the releases page so the user can update manually.
-            NSWorkspace.shared.open(releasesPage)
+            NSLog("Homebrew update failed: \(error.localizedDescription)")
+            showUpdateMessage("Couldn’t start update", detail: error.localizedDescription)
         }
+    }
+
+    private func installDirectUpdate(_ release: AppRelease) {
+        guard let url = release.diskImageURL else { return }
+        installingUpdate = true
+        updateItem.title = "Downloading update…"
+        updateItem.isEnabled = false
+        checkUpdateItem.isEnabled = false
+        let destination = Bundle.main.bundleURL.resolvingSymlinksInPath()
+        let request = URLRequest(url: url, timeoutInterval: 300)
+        URLSession.shared.downloadTask(with: request) { [weak self] temporaryURL, response, error in
+            do {
+                if let error { throw error }
+                guard let response = response as? HTTPURLResponse, response.statusCode == 200,
+                      let temporaryURL else {
+                    throw UpdateFailure(message: "The release download failed. Please try again later.")
+                }
+                let fm = FileManager.default
+                let work = fm.temporaryDirectory.appendingPathComponent("mic-music-pause-update-\(UUID().uuidString)")
+                try fm.createDirectory(at: work, withIntermediateDirectories: false)
+                defer {
+                    do { try fm.removeItem(at: work) }
+                    catch { NSLog("Update download cleanup failed: \(error.localizedDescription)") }
+                }
+                let diskImage = work.appendingPathComponent("update.dmg")
+                try fm.moveItem(at: temporaryURL, to: diskImage)
+                DispatchQueue.main.async { self?.updateItem.title = "Installing update…" }
+                try AppUpdateInstaller.install(diskImage: diskImage, at: destination, version: release.version)
+                DispatchQueue.main.async {
+                    guard let self else { return }
+                    self.updateItem.title = "Update installed — restart required"
+                    let configuration = NSWorkspace.OpenConfiguration()
+                    configuration.createsNewApplicationInstance = true
+                    if self.pausedByUs {
+                        configuration.arguments = ["--resume-owned-pause", self.pauseReason]
+                    }
+                    NSWorkspace.shared.openApplication(at: destination, configuration: configuration) { _, error in
+                        DispatchQueue.main.async {
+                            if let error {
+                                self.showUpdateMessage("Update installed; restart required", detail: "Quit and reopen the app to finish updating. \(error.localizedDescription)")
+                            } else {
+                                NSApp.terminate(nil)
+                            }
+                        }
+                    }
+                }
+            } catch {
+                DispatchQueue.main.async {
+                    guard let self else { return }
+                    self.installingUpdate = false
+                    self.updateItem.isEnabled = true
+                    self.checkUpdateItem.isEnabled = true
+                    self.applyUpdateState(release: release)
+                    NSLog("Update installation failed: \(error.localizedDescription)")
+                    self.showUpdateMessage("Couldn’t install update", detail: error.localizedDescription)
+                }
+            }
+        }.resume()
     }
 
     // MARK: Diagnostics window (troubleshooter)
@@ -895,30 +1188,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private func tick() {
         let canAutoResume = !resumeOnlyOnExternalOutput || externalOutputConnected()
 
-        // Mic (a call) always triggers. Other-app audio triggers only when enabled,
-        // and the SAME source must keep playing for `audioConfirmSeconds` so brief
-        // notification dings (which don't sustain that long) are ignored. Resume,
-        // however, happens on the very next poll once audio clears.
+        // Confirm each source independently so a notification cannot displace
+        // sustained video audio. Debounce release as well as activation.
         let mic = micActive()
-        var audioActive = false
         if pauseOnOtherAudio {
-            if let src = otherAudioSource(ignoring: ignoredAudioApps) {
-                // A new/changed source restarts the confirmation window, so a short
-                // ding from one app can't add its time to unrelated blips from
-                // another — only genuinely sustained playback from one source counts.
-                if src != audioActiveSource {
-                    audioActiveSource = src
-                    audioActiveSince = Date()
-                }
-                audioActive = Date().timeIntervalSince(audioActiveSince ?? Date()) >= audioConfirmSeconds
-            } else {
-                audioActiveSince = nil
-                audioActiveSource = nil
-            }
+            audioActivity.update(sources: otherAudioSources(ignoring: ignoredAudioApps),
+                                 now: ProcessInfo.processInfo.systemUptime)
         } else {
-            audioActiveSince = nil
-            audioActiveSource = nil
+            audioActivity = AudioActivityTracker()
         }
+        let audioActiveSource = audioActivity.source
+        let audioActive = audioActiveSource != nil
 
         let active = mic || audioActive || (pauseOnScreenLock && screenLocked)
         let reason = mic ? "call" : (audioActive ? "audio" : ((pauseOnScreenLock && screenLocked) ? "lock" : ""))
@@ -1001,6 +1281,14 @@ extension AppDelegate: NSWindowDelegate {
     }
 }
 
+extension AppDelegate: NSMenuItemValidation {
+    func validateMenuItem(_ menuItem: NSMenuItem) -> Bool {
+        if menuItem === checkUpdateItem { return !checkingForUpdate && !installingUpdate }
+        if menuItem === updateItem { return !installingUpdate }
+        return true
+    }
+}
+
 // MARK: - Ignore-audio submenu (live) -------------------------------------------
 
 extension AppDelegate: NSMenuDelegate {
@@ -1059,8 +1347,17 @@ extension AppDelegate: NSMenuDelegate {
 
 // MARK: - Entry point -----------------------------------------------------------
 
-let app = NSApplication.shared
-let delegate = AppDelegate()
-app.delegate = delegate
-app.setActivationPolicy(.accessory) // menu bar only, no Dock icon
-app.run()
+#if !APP_TESTS
+@main
+enum MenuBarApp {
+    static func main() {
+        let app = NSApplication.shared
+        let delegate = AppDelegate()
+        app.delegate = delegate
+        app.setActivationPolicy(.accessory) // menu bar only, no Dock icon
+        withExtendedLifetime(delegate) {
+            app.run()
+        }
+    }
+}
+#endif

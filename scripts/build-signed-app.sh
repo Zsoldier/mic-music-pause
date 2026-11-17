@@ -50,7 +50,7 @@ mkdir -p "$OUT_DIR"
 
 echo "==> Compiling menu bar app"
 mkdir -p "$APP/Contents/MacOS"
-xcrun swiftc -O -o "$APP/Contents/MacOS/mic-music-pause-menubar" "$REPO_DIR/src/menubar.swift"
+xcrun swiftc -parse-as-library -O -o "$APP/Contents/MacOS/mic-music-pause-menubar" "$REPO_DIR/src/menubar.swift"
 
 echo "==> Writing Info.plist"
 cat > "$APP/Contents/Info.plist" <<PLIST
