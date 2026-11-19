@@ -209,12 +209,26 @@ func outputtingProcesses() -> [AudioOutputProcess] {
 /// id so transient system sounds and CLI helpers (e.g. afplay/notifications)
 /// don't count, and skip any app the user has chosen to ignore (e.g. iPhone
 /// Mirroring, which holds a silent output stream open).
+/// macOS daemons that only play alert, UI and notification sounds. They report
+/// a bundle id to CoreAudio and keep their output stream open for 10+ seconds
+/// after a short sound, so they must never count as "another app playing audio".
+let systemSoundProcesses: Set<String> = [
+    "systemsoundserverd",
+    "com.apple.systemsoundserverd",
+    "com.apple.audio.SystemSoundServer-OSX",
+]
+
+/// Whether audio from this bundle id may trigger an "other app audio" pause.
+func canTriggerAudioPause(_ bundleID: String, ignoring ignored: Set<String> = []) -> Bool {
+    !bundleID.isEmpty && bundleID != "com.apple.Music"
+        && !systemSoundProcesses.contains(bundleID) && !ignored.contains(bundleID)
+}
+
 func otherAudioSources(ignoring ignored: Set<String> = []) -> Set<String> {
     var sources = Set<String>()
     for p in outputtingProcesses() {
         let bid = p.bundleID
-        if bid.isEmpty || bid == "com.apple.Music" { continue }
-        if ignored.contains(bid) { continue }
+        if !canTriggerAudioPause(bid, ignoring: ignored) { continue }
         sources.insert(bid)
     }
     return sources
@@ -1167,7 +1181,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         let procs = outputtingProcesses()
         let ignored = ignoredAudioApps
-        let triggering = procs.filter { !$0.bundleID.isEmpty && $0.bundleID != "com.apple.Music" && !ignored.contains($0.bundleID) }
+        let triggering = procs.filter { canTriggerAudioPause($0.bundleID, ignoring: ignored) }
         out += "Audio output (processes making sound)\n"
         if procs.isEmpty {
             out += "  Nothing is playing audio right now.\n"
@@ -1176,7 +1190,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 let bidText = p.bundleID.isEmpty ? "no bundle id" : p.bundleID
                 var tags = ""
                 if p.bundleID == "com.apple.Music" { tags += "  [Apple Music]" }
-                if ignored.contains(p.bundleID) { tags += "  [IGNORED — won't pause]" }
+                if systemSoundProcesses.contains(p.bundleID) { tags += "  [system alert sounds — won't pause]" }
+                else if ignored.contains(p.bundleID) { tags += "  [IGNORED — won't pause]" }
                 else if isNotificationAudioApp(p.bundleID) {
                     tags += "  [notification app — pauses only after \(Int(AudioActivityTracker.notificationConfirmSeconds))s]"
                 }
@@ -1346,7 +1361,7 @@ extension AppDelegate: NSMenuDelegate {
         let ignored = ignoredAudioApps
         // Apps currently outputting audio that AREN'T ignored — offer to ignore.
         let playing = outputtingProcesses().filter {
-            !$0.bundleID.isEmpty && $0.bundleID != "com.apple.Music" && !ignored.contains($0.bundleID)
+            canTriggerAudioPause($0.bundleID, ignoring: ignored)
         }
 
         let header = NSMenuItem(title: "Check an app to stop its audio from pausing music", action: nil, keyEquivalent: "")

@@ -26,6 +26,8 @@ icon). Click it to:
   Teams, Messages, Mail, Outlook, Discord, WhatsApp, etc., including their
   helper processes such as Teams' web view) it must last about 12 seconds, because those apps keep their audio stream open for a while after
   a notification chime. Diagnostics tags these apps as "notification app".
+  macOS alert and notification sounds (played by the system sound server,
+  `systemsoundserverd`) never pause Music.
 - **Ignore audio source ▸** — submenu to exclude specific apps from triggering an
   "other-app audio" pause. Some apps (e.g. **iPhone Mirroring**) hold a silent
   audio stream open, which would otherwise cause phantom pauses; iPhone Mirroring
