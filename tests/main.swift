@@ -99,6 +99,16 @@ final class AudioActivityTests {
         precondition(tracker.confirmSeconds(for: "com.microsoft.edgemac.helper") == AudioActivityTracker.confirmSeconds)
     }
 
+    func testSystemAlertSoundsNeverTriggerPause() {
+        // System Settings alert previews and notification sounds are played by
+        // systemsoundserverd, which reports a bundle id and lingers 10+ seconds.
+        precondition(!canTriggerAudioPause("systemsoundserverd"))
+        precondition(!canTriggerAudioPause("com.apple.Music"))
+        precondition(!canTriggerAudioPause(""))
+        precondition(!canTriggerAudioPause("com.google.Chrome", ignoring: ["com.google.Chrome"]))
+        precondition(canTriggerAudioPause("com.google.Chrome"))
+    }
+
     func testAnotherSustainedSourceKeepsPause() {
         var tracker = AudioActivityTracker()
         tracker.update(sources: ["video", "browser"], now: 0)
@@ -187,11 +197,12 @@ enum RegressionTestRunner {
         tests.testVideoStillConfirmsQuicklyAlongsideChatApp()
         tests.testDefaultNotificationAppsUseLongerConfirm()
         tests.testNotificationAppHelpersUseLongerConfirm()
+        tests.testSystemAlertSoundsNeverTriggerPause()
         let updates = AppUpdateTests()
         try updates.testReleaseDecoding()
         updates.testRejectsUnexpectedDownloads()
         updates.testRejectsUnstableAndMalformedReleases()
         try updates.testRejectsUnsignedApp()
-        print("All 13 audio activity and update regression tests passed.")
+        print("All 14 audio activity and update regression tests passed.")
     }
 }
