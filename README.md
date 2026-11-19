@@ -114,8 +114,17 @@ cd mic-music-pause
 ./scripts/install-local.sh
 ```
 
-This compiles the detector, installs the script to `~/.local/bin`, and loads a
-`launchd` LaunchAgent. Remove it with `./scripts/uninstall-local.sh`.
+This builds and installs **mic-music-pause.app** in **/Applications**, installs
+the CLI to `~/.local/bin`, and opens the menu bar app. No separate background
+service is needed: choose **Quit** from the menu bar to stop it, then double-click
+**mic-music-pause** in Applications (or find it with Spotlight) to start it again.
+Enable **Start at login** in its menu if desired.
+
+The installer removes the legacy local LaunchAgent so it no longer restarts the
+app after you quit. Local builds are ad-hoc signed rather than notarized and may
+ask for permission to control Music again. Installing requires write access to
+/Applications. Remove the local install with `./scripts/uninstall-local.sh`
+after quitting the app and disabling **Start at login**.
 
 ## Usage
 
@@ -181,6 +190,16 @@ mic-music-pause help
   system sounds and command-line players are ignored.
 
 ## Releasing (maintainers)
+
+The app icon is bundled from `packaging/AppIcon.icns` for both local and signed
+builds. To regenerate it after changing `scripts/generate-app-icon.swift`:
+
+```sh
+icon_work="$(mktemp -d)"
+xcrun swift scripts/generate-app-icon.swift "$icon_work/AppIcon.iconset" &&
+  iconutil -c icns "$icon_work/AppIcon.iconset" -o packaging/AppIcon.icns
+rm -rf "$icon_work"
+```
 
 Run the audio debounce and update regression tests without launching the menu bar app:
 
