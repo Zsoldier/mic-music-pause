@@ -87,6 +87,18 @@ final class AudioActivityTests {
         precondition(tracker.confirmSeconds(for: "com.google.Chrome") == AudioActivityTracker.confirmSeconds)
     }
 
+    func testNotificationAppHelpersUseLongerConfirm() {
+        let tracker = AudioActivityTracker()
+        let slow = AudioActivityTracker.notificationConfirmSeconds
+        // Teams plays chimes from its WebView helper and notification XPC service.
+        precondition(tracker.confirmSeconds(for: "com.microsoft.teams2.helper") == slow)
+        precondition(tracker.confirmSeconds(for: "com.microsoft.teams2.notificationcenter") == slow)
+        precondition(tracker.confirmSeconds(for: "com.tinyspeck.slackmacgap.helper") == slow)
+        // Only a dot-separated suffix counts, and unrelated helpers stay fast.
+        precondition(tracker.confirmSeconds(for: "com.apple.mailx") == AudioActivityTracker.confirmSeconds)
+        precondition(tracker.confirmSeconds(for: "com.microsoft.edgemac.helper") == AudioActivityTracker.confirmSeconds)
+    }
+
     func testAnotherSustainedSourceKeepsPause() {
         var tracker = AudioActivityTracker()
         tracker.update(sources: ["video", "browser"], now: 0)
@@ -174,11 +186,12 @@ enum RegressionTestRunner {
         tests.testNotificationAppStreamNeedsLongerConfirm()
         tests.testVideoStillConfirmsQuicklyAlongsideChatApp()
         tests.testDefaultNotificationAppsUseLongerConfirm()
+        tests.testNotificationAppHelpersUseLongerConfirm()
         let updates = AppUpdateTests()
         try updates.testReleaseDecoding()
         updates.testRejectsUnexpectedDownloads()
         updates.testRejectsUnstableAndMalformedReleases()
         try updates.testRejectsUnsignedApp()
-        print("All 12 audio activity and update regression tests passed.")
+        print("All 13 audio activity and update regression tests passed.")
     }
 }

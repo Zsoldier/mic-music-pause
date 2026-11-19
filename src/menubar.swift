@@ -245,6 +245,15 @@ let notificationAudioApps: Set<String> = [
     "com.readdle.smartemail-Mac",      // Spark
 ]
 
+/// True when `bundleID` is a listed notification app or one of its helper
+/// processes. Many chat apps play sounds from an embedded web view or helper
+/// with its own bundle id (e.g. Teams uses `com.microsoft.teams2.helper`), so
+/// a listed id also matches any bundle id that starts with it plus a dot.
+func isNotificationAudioApp(_ bundleID: String, in apps: Set<String> = notificationAudioApps) -> Bool {
+    if apps.contains(bundleID) { return true }
+    return apps.contains { bundleID.hasPrefix($0 + ".") }
+}
+
 struct AudioActivityTracker {
     private var activeSince: [String: TimeInterval] = [:]
     private var inactiveSince: TimeInterval?
@@ -259,7 +268,7 @@ struct AudioActivityTracker {
     }
 
     func confirmSeconds(for source: String) -> TimeInterval {
-        slowSources.contains(source) ? Self.notificationConfirmSeconds : Self.confirmSeconds
+        isNotificationAudioApp(source, in: slowSources) ? Self.notificationConfirmSeconds : Self.confirmSeconds
     }
 
     mutating func update(sources: Set<String>, now: TimeInterval) {
@@ -1168,7 +1177,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 var tags = ""
                 if p.bundleID == "com.apple.Music" { tags += "  [Apple Music]" }
                 if ignored.contains(p.bundleID) { tags += "  [IGNORED — won't pause]" }
-                else if notificationAudioApps.contains(p.bundleID) {
+                else if isNotificationAudioApp(p.bundleID) {
                     tags += "  [notification app — pauses only after \(Int(AudioActivityTracker.notificationConfirmSeconds))s]"
                 }
                 if p.bundleID.isEmpty { tags += "  [no bundle id — won't pause]" }
