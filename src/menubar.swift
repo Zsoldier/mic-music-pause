@@ -220,12 +220,47 @@ func otherAudioSources(ignoring ignored: Set<String> = []) -> Set<String> {
     return sources
 }
 
+/// Apps whose audio is almost always a notification sound (chat, mail, calendar).
+/// They tend to keep an output stream open for several seconds after a short
+/// chime, so they must output audio for much longer before Music is paused.
+/// Calls from these apps are still caught instantly by the mic check.
+let notificationAudioApps: Set<String> = [
+    "com.tinyspeck.slackmacgap",       // Slack
+    "com.microsoft.teams2",            // Microsoft Teams
+    "com.microsoft.teams",             // Microsoft Teams (classic)
+    "com.microsoft.Outlook",           // Outlook
+    "com.apple.MobileSMS",             // Messages
+    "com.apple.mail",                  // Mail
+    "com.apple.iCal",                  // Calendar
+    "com.apple.reminders",             // Reminders
+    "com.apple.notificationcenterui",  // Notification Center
+    "com.hnc.Discord",                 // Discord
+    "net.whatsapp.WhatsApp",           // WhatsApp
+    "desktop.WhatsApp",                // WhatsApp (Catalyst)
+    "ru.keepcoder.Telegram",           // Telegram
+    "org.whispersystems.signal-desktop", // Signal
+    "com.facebook.archon",             // Messenger
+    "us.zoom.xos",                     // Zoom (chat chimes; calls use the mic)
+    "com.webex.meetingmanager",        // Webex
+    "com.readdle.smartemail-Mac",      // Spark
+]
+
 struct AudioActivityTracker {
     private var activeSince: [String: TimeInterval] = [:]
     private var inactiveSince: TimeInterval?
     private(set) var source: String?
-    private let confirmSeconds = 3.0
+    static let confirmSeconds = 3.0
+    static let notificationConfirmSeconds = 12.0
     private let releaseSeconds = 3.0
+    private let slowSources: Set<String>
+
+    init(slowSources: Set<String> = notificationAudioApps) {
+        self.slowSources = slowSources
+    }
+
+    func confirmSeconds(for source: String) -> TimeInterval {
+        slowSources.contains(source) ? Self.notificationConfirmSeconds : Self.confirmSeconds
+    }
 
     mutating func update(sources: Set<String>, now: TimeInterval) {
         activeSince = activeSince.filter { sources.contains($0.key) }
@@ -238,7 +273,7 @@ struct AudioActivityTracker {
             return
         }
         if let confirmed = sources.sorted().first(where: {
-            now - activeSince[$0, default: now] >= confirmSeconds
+            now - activeSince[$0, default: now] >= confirmSeconds(for: $0)
         }) {
             source = confirmed
             inactiveSince = nil
@@ -1133,6 +1168,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 var tags = ""
                 if p.bundleID == "com.apple.Music" { tags += "  [Apple Music]" }
                 if ignored.contains(p.bundleID) { tags += "  [IGNORED — won't pause]" }
+                else if notificationAudioApps.contains(p.bundleID) {
+                    tags += "  [notification app — pauses only after \(Int(AudioActivityTracker.notificationConfirmSeconds))s]"
+                }
                 if p.bundleID.isEmpty { tags += "  [no bundle id — won't pause]" }
                 out += "  ♪ \(p.name) (\(bidText), pid \(p.pid))\(tags)\n"
             }
