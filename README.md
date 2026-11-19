@@ -21,7 +21,11 @@ icon). Click it to:
 - **Also pause for audio from other apps** — optional (off by default). When on,
   Music also pauses if another app (e.g. a video in your browser) starts playing
   audio, and resumes after it stops. A short quiet-period check keeps notifications
-  and brief audio interruptions from resuming Music over a video.
+  and brief audio interruptions from resuming Music over a video. Audio must last
+  about 3 seconds before Music pauses; for chat, mail and calendar apps (Slack,
+  Teams, Messages, Mail, Outlook, Discord, WhatsApp, etc.) it must last about
+  12 seconds, because those apps keep their audio stream open for a while after
+  a notification chime. Diagnostics tags these apps as "notification app".
 - **Ignore audio source ▸** — submenu to exclude specific apps from triggering an
   "other-app audio" pause. Some apps (e.g. **iPhone Mirroring**) hold a silent
   audio stream open, which would otherwise cause phantom pauses; iPhone Mirroring

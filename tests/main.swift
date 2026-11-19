@@ -56,6 +56,37 @@ final class AudioActivityTests {
         precondition(tracker.source == "video")
     }
 
+    func testNotificationAppStreamNeedsLongerConfirm() {
+        // A chat app keeps its output stream open for several seconds after a chime.
+        var tracker = AudioActivityTracker(slowSources: ["chat"])
+        tracker.update(sources: ["chat"], now: 0)
+        tracker.update(sources: ["chat"], now: 4)
+        tracker.update(sources: ["chat"], now: 8)
+        precondition(tracker.source == nil)
+        tracker.update(sources: [], now: 10)
+        precondition(tracker.source == nil)
+
+        // Sustained audio from the same app (e.g. a voice memo) still pauses eventually.
+        tracker.update(sources: ["chat"], now: 20)
+        tracker.update(sources: ["chat"], now: 31.9)
+        precondition(tracker.source == nil)
+        tracker.update(sources: ["chat"], now: 32)
+        precondition(tracker.source == "chat")
+    }
+
+    func testVideoStillConfirmsQuicklyAlongsideChatApp() {
+        var tracker = AudioActivityTracker(slowSources: ["chat"])
+        tracker.update(sources: ["chat", "video"], now: 0)
+        tracker.update(sources: ["chat", "video"], now: 3)
+        precondition(tracker.source == "video")
+    }
+
+    func testDefaultNotificationAppsUseLongerConfirm() {
+        let tracker = AudioActivityTracker()
+        precondition(tracker.confirmSeconds(for: "com.tinyspeck.slackmacgap") == AudioActivityTracker.notificationConfirmSeconds)
+        precondition(tracker.confirmSeconds(for: "com.google.Chrome") == AudioActivityTracker.confirmSeconds)
+    }
+
     func testAnotherSustainedSourceKeepsPause() {
         var tracker = AudioActivityTracker()
         tracker.update(sources: ["video", "browser"], now: 0)
@@ -140,11 +171,14 @@ enum RegressionTestRunner {
         tests.testBriefOutputInterruptionKeepsPause()
         tests.testResumeRequiresSustainedInactivity()
         tests.testAnotherSustainedSourceKeepsPause()
+        tests.testNotificationAppStreamNeedsLongerConfirm()
+        tests.testVideoStillConfirmsQuicklyAlongsideChatApp()
+        tests.testDefaultNotificationAppsUseLongerConfirm()
         let updates = AppUpdateTests()
         try updates.testReleaseDecoding()
         updates.testRejectsUnexpectedDownloads()
         updates.testRejectsUnstableAndMalformedReleases()
         try updates.testRejectsUnsignedApp()
-        print("All 9 audio activity and update regression tests passed.")
+        print("All 12 audio activity and update regression tests passed.")
     }
 }
