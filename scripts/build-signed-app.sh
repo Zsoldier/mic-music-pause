@@ -50,6 +50,8 @@ mkdir -p "$OUT_DIR"
 
 echo "==> Compiling menu bar app"
 mkdir -p "$APP/Contents/MacOS"
+mkdir -p "$APP/Contents/Resources"
+cp "$REPO_DIR/packaging/AppIcon.icns" "$APP/Contents/Resources/AppIcon.icns"
 xcrun swiftc -parse-as-library -O -o "$APP/Contents/MacOS/mic-music-pause-menubar" "$REPO_DIR/src/menubar.swift"
 
 echo "==> Writing Info.plist"
@@ -62,6 +64,7 @@ cat > "$APP/Contents/Info.plist" <<PLIST
   <key>CFBundleDisplayName</key><string>mic-music-pause</string>
   <key>CFBundleIdentifier</key><string>com.zsoldier.mic-music-pause</string>
   <key>CFBundleExecutable</key><string>mic-music-pause-menubar</string>
+  <key>CFBundleIconFile</key><string>AppIcon</string>
   <key>CFBundlePackageType</key><string>APPL</string>
   <key>CFBundleShortVersionString</key><string>${VERSION}</string>
   <key>CFBundleVersion</key><string>${VERSION}</string>

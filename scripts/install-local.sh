@@ -1,24 +1,33 @@
 #!/bin/bash
 # Manual (non-Homebrew) installer: compiles the detector, installs the CLI to
-# ~/.local/bin, and loads a launchd LaunchAgent that runs at login.
+# ~/.local/bin, and installs the menu bar app in /Applications.
 set -euo pipefail
 
 REPO_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 BIN_DIR="$HOME/.local/bin"
 LIBEXEC_DIR="$HOME/.local/libexec/mic-music-pause"
 AGENT="$HOME/Library/LaunchAgents/com.zsoldier.mic-music-pause.plist"
+APP="/Applications/mic-music-pause.app"
 
-mkdir -p "$BIN_DIR" "$LIBEXEC_DIR" "$HOME/Library/LaunchAgents"
+if [ ! -w /Applications ]; then
+  echo "Cannot write to /Applications. Run this installer from an account with permission to install apps." >&2
+  exit 1
+fi
+
+mkdir -p "$BIN_DIR" "$LIBEXEC_DIR"
+WORK="$(mktemp -d)"
+trap 'rm -rf "$WORK"' EXIT
 
 echo "Compiling detector..."
 xcrun swiftc -O -o "$LIBEXEC_DIR/micstate" "$REPO_DIR/src/micstate.swift"
 
 echo "Building menu bar app bundle..."
-APP="$LIBEXEC_DIR/mic-music-pause.app"
-rm -rf "$APP"
-mkdir -p "$APP/Contents/MacOS"
-xcrun swiftc -parse-as-library -O -o "$APP/Contents/MacOS/mic-music-pause-menubar" "$REPO_DIR/src/menubar.swift"
-cat > "$APP/Contents/Info.plist" <<'PLIST'
+STAGED_APP="$WORK/mic-music-pause.app"
+mkdir -p "$STAGED_APP/Contents/MacOS"
+mkdir -p "$STAGED_APP/Contents/Resources"
+cp "$REPO_DIR/packaging/AppIcon.icns" "$STAGED_APP/Contents/Resources/AppIcon.icns"
+xcrun swiftc -parse-as-library -O -o "$STAGED_APP/Contents/MacOS/mic-music-pause-menubar" "$REPO_DIR/src/menubar.swift"
+cat > "$STAGED_APP/Contents/Info.plist" <<'PLIST'
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
@@ -27,6 +36,7 @@ cat > "$APP/Contents/Info.plist" <<'PLIST'
   <key>CFBundleDisplayName</key><string>mic-music-pause</string>
   <key>CFBundleIdentifier</key><string>com.zsoldier.mic-music-pause</string>
   <key>CFBundleExecutable</key><string>mic-music-pause-menubar</string>
+  <key>CFBundleIconFile</key><string>AppIcon</string>
   <key>CFBundlePackageType</key><string>APPL</string>
   <key>CFBundleShortVersionString</key><string>0.0.0-local</string>
   <key>CFBundleVersion</key><string>0.0.0-local</string>
@@ -37,7 +47,19 @@ cat > "$APP/Contents/Info.plist" <<'PLIST'
 </dict>
 </plist>
 PLIST
-/usr/bin/codesign --force --sign - --identifier com.zsoldier.mic-music-pause "$APP" 2>/dev/null || true
+/usr/bin/plutil -lint "$STAGED_APP/Contents/Info.plist"
+/usr/bin/codesign --force --sign - --identifier com.zsoldier.mic-music-pause "$STAGED_APP"
+/usr/bin/codesign --verify --strict "$STAGED_APP"
+
+# Older local installs used KeepAlive, which relaunches the app after Quit.
+SERVICE="gui/$(id -u)/com.zsoldier.mic-music-pause"
+if launchctl print "$SERVICE" >/dev/null 2>&1; then
+  launchctl bootout "$SERVICE"
+fi
+rm -f "$AGENT"
+
+echo "Installing app to $APP..."
+ditto "$STAGED_APP" "$APP"
 
 echo "Installing CLI to $BIN_DIR..."
 install -m 0755 "$REPO_DIR/bin/mic-music-pause" "$BIN_DIR/mic-music-pause"
@@ -47,29 +69,9 @@ exec "$APP/Contents/MacOS/mic-music-pause-menubar" "\$@"
 SH
 chmod 0755 "$BIN_DIR/mic-music-pause-menubar"
 
-echo "Writing LaunchAgent..."
-cat > "$AGENT" <<PLIST
-<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0">
-<dict>
-  <key>Label</key><string>com.zsoldier.mic-music-pause</string>
-  <key>ProgramArguments</key>
-  <array>
-    <string>$APP/Contents/MacOS/mic-music-pause-menubar</string>
-  </array>
-  <key>RunAtLoad</key><true/>
-  <key>KeepAlive</key><true/>
-  <key>StandardOutPath</key><string>$HOME/.local/state/mic-music-pause/watch.log</string>
-  <key>StandardErrorPath</key><string>$HOME/.local/state/mic-music-pause/watch.log</string>
-</dict>
-</plist>
-PLIST
-
-mkdir -p "$HOME/.local/state/mic-music-pause"
-launchctl unload "$AGENT" 2>/dev/null || true
-launchctl load "$AGENT"
+open "$APP"
 
 echo "Installed and started — look for the music-note icon in your menu bar."
-echo "Verify with: launchctl list | grep mic-music-pause"
+echo "Quit from its menu; reopen mic-music-pause from Applications whenever you need it."
+echo "To launch automatically at login, enable Start at login in the app's menu."
 echo "Make sure $BIN_DIR is on your PATH."
